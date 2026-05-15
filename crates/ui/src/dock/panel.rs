@@ -4,7 +4,8 @@ use gpui::{
     FocusHandle, Focusable, Global, Hsla, IntoElement, Render, SharedString, WeakEntity, Window,
 };
 use rust_i18n::t;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
+use rustc_hash::FxHashMap;
 
 use super::{DockArea, PanelInfo, PanelState, invalid_panel::InvalidPanel};
 
@@ -291,7 +292,7 @@ impl PartialEq for dyn PanelView {
 }
 
 pub struct PanelRegistry {
-    pub(super) items: HashMap<
+    pub(super) items: FxHashMap<
         String,
         Arc<
             dyn Fn(
@@ -314,7 +315,7 @@ impl PanelRegistry {
 
     pub fn new() -> Self {
         Self {
-            items: HashMap::new(),
+            items: FxHashMap::default(),
         }
     }
 

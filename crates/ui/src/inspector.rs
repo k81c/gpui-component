@@ -1,4 +1,5 @@
-use std::{cell::OnceCell, collections::HashMap, fmt::Write as _, rc::Rc, sync::OnceLock};
+use std::{cell::OnceCell, fmt::Write as _, rc::Rc, sync::OnceLock};
+use rustc_hash::FxHashMap;
 
 use anyhow::Result;
 use gpui::{
@@ -277,7 +278,7 @@ fn style_to_json(style: &StyleRefinement) -> String {
 
 struct StyleMethods {
     table: Vec<(Box<StyleRefinement>, FunctionReflection<StyleRefinement>)>,
-    map: HashMap<&'static str, FunctionReflection<StyleRefinement>>,
+    map: FxHashMap<&'static str, FunctionReflection<StyleRefinement>>,
 }
 
 impl StyleMethods {

@@ -57,9 +57,9 @@ impl InputMode {
     #[inline]
     pub(super) fn is_indentable(&self) -> bool {
         match self {
-            InputMode::PlainText { multi_line, .. } | InputMode::CodeEditor { multi_line, .. } => {
-                *multi_line
-            }
+            InputMode::PlainText { multi_line, .. }
+            | InputMode::CodeEditor { multi_line, .. }
+            | InputMode::MarkedEditor { multi_line, .. } => *multi_line,
             _ => false,
         }
     }
@@ -68,6 +68,11 @@ impl InputMode {
     pub(super) fn has_indent_guides(&self) -> bool {
         match self {
             InputMode::CodeEditor {
+                indent_guides,
+                multi_line,
+                ..
+            }
+            | InputMode::MarkedEditor {
                 indent_guides,
                 multi_line,
                 ..
@@ -80,7 +85,7 @@ impl InputMode {
     pub(super) fn tab_size(&self) -> TabSize {
         match self {
             InputMode::PlainText { tab, .. } => *tab,
-            InputMode::CodeEditor { tab, .. } => *tab,
+            InputMode::CodeEditor { tab, .. } | InputMode::MarkedEditor { tab, .. } => *tab,
             _ => TabSize::default(),
         }
     }
@@ -123,16 +128,19 @@ impl TextElement {
             self.measure_indent_width(text_style, state.mode.tab_size().tab_size, window);
 
         let tab_size = state.mode.tab_size();
-        let line_height = last_layout.line_height;
         let mut builder = PathBuilder::stroke(px(1.));
         let mut offset_y = last_layout.visible_top;
         let mut last_indents = vec![];
 
-        for (&buffer_line, line_layout) in last_layout
+        for (vi, (&buffer_line, line_layout)) in last_layout
             .visible_buffer_lines
             .iter()
             .zip(last_layout.lines.iter())
+            .enumerate()
         {
+            let line_metrics = last_layout.line_metrics_for_visible_index(vi);
+            let line_height = line_metrics.line_height;
+            let line_top = offset_y + line_metrics.spacing_before;
             let line = state.text.slice_line(buffer_line);
             let mut current_indents = vec![];
             if line.len() > 0 {
@@ -144,22 +152,25 @@ impl TextElement {
                         px(0.)
                     };
 
-                    let pos = point(x + last_layout.line_number_width, offset_y);
+                    let pos = point(x + last_layout.line_number_width, line_top);
 
                     builder.move_to(pos);
-                    builder.line_to(point(pos.x, pos.y + line_height));
+                    builder.line_to(point(
+                        pos.x,
+                        pos.y + line_height * line_layout.wrapped_lines.len(),
+                    ));
                     current_indents.push(pos.x);
                 }
             } else if last_indents.len() > 0 {
                 for x in &last_indents {
-                    let pos = point(*x, offset_y);
+                    let pos = point(*x, line_top);
                     builder.move_to(pos);
                     builder.line_to(point(pos.x, pos.y + line_height));
                 }
                 current_indents = last_indents.clone();
             }
 
-            offset_y += line_layout.wrapped_lines.len() * line_height;
+            offset_y += line_metrics.row_height(line_layout.wrapped_lines.len());
             last_indents = current_indents;
         }
 
@@ -176,6 +187,9 @@ impl InputState {
     pub fn indent_guides(mut self, indent_guides: bool) -> Self {
         debug_assert!(self.mode.is_code_editor() && self.mode.is_multi_line());
         if let InputMode::CodeEditor {
+            indent_guides: l, ..
+        }
+        | InputMode::MarkedEditor {
             indent_guides: l, ..
         } = &mut self.mode
         {
@@ -196,6 +210,9 @@ impl InputState {
         debug_assert!(self.mode.is_code_editor());
         if let InputMode::CodeEditor {
             indent_guides: l, ..
+        }
+        | InputMode::MarkedEditor {
+            indent_guides: l, ..
         } = &mut self.mode
         {
             *l = indent_guides;
@@ -210,7 +227,9 @@ impl InputState {
         debug_assert!(self.mode.is_multi_line() || self.mode.is_code_editor());
         match &mut self.mode {
             InputMode::PlainText { tab: t, .. } => *t = tab,
-            InputMode::CodeEditor { tab: t, .. } => *t = tab,
+            InputMode::CodeEditor { tab: t, .. } | InputMode::MarkedEditor { tab: t, .. } => {
+                *t = tab
+            }
             _ => {}
         }
         self

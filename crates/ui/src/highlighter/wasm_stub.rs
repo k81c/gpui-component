@@ -89,7 +89,6 @@ pub struct LanguageConfig {
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
     sync::{LazyLock, Mutex},
 };
 
@@ -276,13 +275,13 @@ impl HighlightTheme {
 
 // Language registry stub
 pub struct LanguageRegistry {
-    languages: Mutex<HashMap<SharedString, LanguageConfig>>,
+    languages: Mutex<FxHashMap<SharedString, LanguageConfig>>,
 }
 
 impl LanguageRegistry {
     pub fn singleton() -> &'static LazyLock<LanguageRegistry> {
         static INSTANCE: LazyLock<LanguageRegistry> = LazyLock::new(|| LanguageRegistry {
-            languages: Mutex::new(HashMap::new()),
+            languages: Mutex::new(FxHashMap::default()),
         });
         &INSTANCE
     }

@@ -1,9 +1,9 @@
+use rustc_hash::FxHashMap;
 use gpui::{App, FontWeight, HighlightStyle, Hsla, SharedString};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::{
-    collections::HashMap,
     ops::Deref,
     sync::{Arc, LazyLock, Mutex},
 };
@@ -466,7 +466,7 @@ impl HighlightTheme {
 
 /// Registry for code highlighter languages.
 pub struct LanguageRegistry {
-    languages: Mutex<HashMap<SharedString, LanguageConfig>>,
+    languages: Mutex<FxHashMap<SharedString, LanguageConfig>>,
 }
 
 impl LanguageRegistry {

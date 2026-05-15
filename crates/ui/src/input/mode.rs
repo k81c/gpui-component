@@ -14,6 +14,7 @@ use crate::input::{InputEdit, RopeExt as _, TabSize};
 pub(super) struct PendingBackgroundParse {
     pub highlighter: Rc<RefCell<Option<SyntaxHighlighter>>>,
     pub parse_task: Rc<RefCell<Option<Task<()>>>>,
+    pub heading_levels: Rc<RefCell<Vec<Option<u8>>>>,
     pub language: SharedString,
     pub text: Rope,
     pub is_folding: bool,
@@ -44,6 +45,23 @@ pub(crate) enum InputMode {
         indent_guides: bool,
         folding: bool,
         highlighter: Rc<RefCell<Option<SyntaxHighlighter>>>,
+        diagnostics: DiagnosticSet,
+        parse_task: Rc<RefCell<Option<Task<()>>>>,
+    },
+    /// A Markdown-oriented editor mode based on [`InputMode::CodeEditor`].
+    ///
+    /// It keeps code editor behavior (highlighting, line numbers, folding, indent guides)
+    /// while allowing line-level layout metrics such as heading font size and line height.
+    MarkedEditor {
+        multi_line: bool,
+        tab: TabSize,
+        rows: usize,
+        line_number: bool,
+        language: SharedString,
+        indent_guides: bool,
+        folding: bool,
+        highlighter: Rc<RefCell<Option<SyntaxHighlighter>>>,
+        heading_levels: Rc<RefCell<Vec<Option<u8>>>>,
         diagnostics: DiagnosticSet,
         parse_task: Rc<RefCell<Option<Task<()>>>>,
     },
@@ -82,6 +100,23 @@ impl InputMode {
         }
     }
 
+    /// Create a marked editor mode with Markdown syntax highlighting.
+    pub(super) fn marked_editor(language: impl Into<SharedString>) -> Self {
+        InputMode::MarkedEditor {
+            rows: 2,
+            multi_line: true,
+            tab: TabSize::default(),
+            language: language.into(),
+            highlighter: Rc::new(RefCell::new(None)),
+            heading_levels: Rc::new(RefCell::new(Vec::new())),
+            line_number: true,
+            indent_guides: true,
+            folding: true,
+            diagnostics: DiagnosticSet::new(&Rope::new()),
+            parse_task: Rc::new(RefCell::new(None)),
+        }
+    }
+
     /// Create an auto grow input mode with given min and max rows.
     pub(super) fn auto_grow(min_rows: usize, max_rows: usize) -> Self {
         InputMode::AutoGrow {
@@ -94,7 +129,8 @@ impl InputMode {
     pub(super) fn multi_line(mut self, multi_line: bool) -> Self {
         match &mut self {
             InputMode::PlainText { multi_line: ml, .. } => *ml = multi_line,
-            InputMode::CodeEditor { multi_line: ml, .. } => *ml = multi_line,
+            InputMode::CodeEditor { multi_line: ml, .. }
+            | InputMode::MarkedEditor { multi_line: ml, .. } => *ml = multi_line,
             InputMode::AutoGrow { .. } => {}
         }
         self
@@ -107,7 +143,15 @@ impl InputMode {
 
     #[inline]
     pub(super) fn is_code_editor(&self) -> bool {
-        matches!(self, InputMode::CodeEditor { .. })
+        matches!(
+            self,
+            InputMode::CodeEditor { .. } | InputMode::MarkedEditor { .. }
+        )
+    }
+
+    #[inline]
+    pub(super) fn is_marked_editor(&self) -> bool {
+        matches!(self, InputMode::MarkedEditor { .. })
     }
 
     /// Return true if the mode is code editor and `folding: true`, `multi_line: true`.
@@ -120,6 +164,10 @@ impl InputMode {
         matches!(
             self,
             InputMode::CodeEditor {
+                folding: true,
+                multi_line: true,
+                ..
+            } | InputMode::MarkedEditor {
                 folding: true,
                 multi_line: true,
                 ..
@@ -136,7 +184,8 @@ impl InputMode {
     pub(super) fn is_multi_line(&self) -> bool {
         match self {
             InputMode::PlainText { multi_line, .. } => *multi_line,
-            InputMode::CodeEditor { multi_line, .. } => *multi_line,
+            InputMode::CodeEditor { multi_line, .. }
+            | InputMode::MarkedEditor { multi_line, .. } => *multi_line,
             InputMode::AutoGrow { max_rows, .. } => *max_rows > 1,
         }
     }
@@ -146,7 +195,7 @@ impl InputMode {
             InputMode::PlainText { rows, .. } => {
                 *rows = new_rows;
             }
-            InputMode::CodeEditor { rows, .. } => {
+            InputMode::CodeEditor { rows, .. } | InputMode::MarkedEditor { rows, .. } => {
                 *rows = new_rows;
             }
             InputMode::AutoGrow {
@@ -176,7 +225,7 @@ impl InputMode {
 
         match self {
             InputMode::PlainText { rows, .. } => *rows,
-            InputMode::CodeEditor { rows, .. } => *rows,
+            InputMode::CodeEditor { rows, .. } | InputMode::MarkedEditor { rows, .. } => *rows,
             InputMode::AutoGrow { rows, .. } => *rows,
         }
         .max(1)
@@ -209,6 +258,11 @@ impl InputMode {
     pub(super) fn line_number(&self) -> bool {
         match self {
             InputMode::CodeEditor {
+                line_number,
+                multi_line,
+                ..
+            }
+            | InputMode::MarkedEditor {
                 line_number,
                 multi_line,
                 ..
@@ -254,7 +308,6 @@ impl InputMode {
                 };
 
                 let edit = replacement_input_edit(old_text, new_text, selected_range, change_text);
-
                 const SYNC_PARSE_TIMEOUT: Duration = Duration::from_millis(2);
                 let completed = h.update(Some(edit), new_text, Some(SYNC_PARSE_TIMEOUT));
                 if completed {
@@ -268,6 +321,50 @@ impl InputMode {
                         text: new_text.clone(),
                         highlighter: highlighter.clone(),
                         parse_task: parse_task.clone(),
+                        heading_levels: Rc::new(RefCell::new(Vec::new())),
+                        is_folding: *folding,
+                    };
+                    drop(highlighter_ref);
+                    Some(pending)
+                }
+            }
+            InputMode::MarkedEditor {
+                language,
+                highlighter,
+                parse_task,
+                heading_levels,
+                folding,
+                ..
+            } => {
+                if !force && highlighter.borrow().is_some() {
+                    return None;
+                }
+
+                let mut highlighter_ref = highlighter.borrow_mut();
+                if highlighter_ref.is_none() {
+                    let new_highlighter = SyntaxHighlighter::new(language);
+                    highlighter_ref.replace(new_highlighter);
+                }
+
+                let Some(h) = highlighter_ref.as_mut() else {
+                    return None;
+                };
+
+                let edit = replacement_input_edit(old_text, new_text, selected_range, change_text);
+                const SYNC_PARSE_TIMEOUT: Duration = Duration::from_millis(2);
+                let completed = h.update(Some(edit), new_text, Some(SYNC_PARSE_TIMEOUT));
+                *heading_levels.borrow_mut() = h.heading_levels();
+
+                if completed {
+                    parse_task.borrow_mut().take();
+                    None
+                } else {
+                    let pending = PendingBackgroundParse {
+                        language: h.language().clone(),
+                        text: new_text.clone(),
+                        highlighter: highlighter.clone(),
+                        parse_task: parse_task.clone(),
+                        heading_levels: heading_levels.clone(),
                         is_folding: *folding,
                     };
                     drop(highlighter_ref);
@@ -281,14 +378,16 @@ impl InputMode {
     #[allow(unused)]
     pub(super) fn diagnostics(&self) -> Option<&DiagnosticSet> {
         match self {
-            InputMode::CodeEditor { diagnostics, .. } => Some(diagnostics),
+            InputMode::CodeEditor { diagnostics, .. }
+            | InputMode::MarkedEditor { diagnostics, .. } => Some(diagnostics),
             _ => None,
         }
     }
 
     pub(super) fn diagnostics_mut(&mut self) -> Option<&mut DiagnosticSet> {
         match self {
-            InputMode::CodeEditor { diagnostics, .. } => Some(diagnostics),
+            InputMode::CodeEditor { diagnostics, .. }
+            | InputMode::MarkedEditor { diagnostics, .. } => Some(diagnostics),
             _ => None,
         }
     }
@@ -296,7 +395,15 @@ impl InputMode {
     /// Get a reference to the highlighter (if available)
     pub(super) fn highlighter(&self) -> Option<&Rc<RefCell<Option<SyntaxHighlighter>>>> {
         match self {
-            InputMode::CodeEditor { highlighter, .. } => Some(highlighter),
+            InputMode::CodeEditor { highlighter, .. }
+            | InputMode::MarkedEditor { highlighter, .. } => Some(highlighter),
+            _ => None,
+        }
+    }
+
+    pub(super) fn marked_heading_levels(&self) -> Option<&Rc<RefCell<Vec<Option<u8>>>>> {
+        match self {
+            InputMode::MarkedEditor { heading_levels, .. } => Some(heading_levels),
             _ => None,
         }
     }

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -103,8 +103,8 @@ fn attr_value(attrs: &RefCell<Vec<html5ever::Attribute>>, name: LocalName) -> Op
 
 /// Get style properties to HashMap
 /// TODO: Use cssparser to parse style attribute.
-fn style_attrs(attrs: &RefCell<Vec<html5ever::Attribute>>) -> HashMap<String, String> {
-    let mut styles = HashMap::new();
+fn style_attrs(attrs: &RefCell<Vec<html5ever::Attribute>>) -> FxHashMap<String, String> {
+    let mut styles = FxHashMap::default();
     let Some(css_text) = attr_value(attrs, local_name!("style")) else {
         return styles;
     };

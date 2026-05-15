@@ -3,7 +3,7 @@ use gpui::{
     InteractiveElement, Interactivity, IntoElement, LayoutId, ParentElement, Pixels,
     StatefulInteractiveElement, StyleRefinement, Styled, WeakFocusHandle, Window,
 };
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 /// Initialize the focus trap manager as a global
 pub(crate) fn init(cx: &mut App) {
@@ -52,7 +52,7 @@ impl<T: InteractiveElement + Sized> FocusTrapElement for T {}
 /// Global state to manage all focus trap containers
 pub(crate) struct FocusTrapManager {
     /// Map from container element ID to its focus trap info
-    traps: HashMap<GlobalElementId, WeakFocusHandle>,
+    traps: FxHashMap<GlobalElementId, WeakFocusHandle>,
 }
 
 impl Global for FocusTrapManager {}
@@ -61,7 +61,7 @@ impl FocusTrapManager {
     /// Create a new focus trap manager
     fn new() -> Self {
         Self {
-            traps: HashMap::new(),
+            traps: FxHashMap::default(),
         }
     }
 

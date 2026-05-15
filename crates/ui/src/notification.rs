@@ -1,6 +1,7 @@
+use rustc_hash::FxHashMap;
 use std::{
     any::TypeId,
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     rc::Rc,
     time::Duration,
 };
@@ -445,7 +446,7 @@ pub struct NotificationList {
     /// Notifications that will be auto hidden.
     pub(crate) notifications: VecDeque<Entity<Notification>>,
     expanded: bool,
-    _subscriptions: HashMap<NotificationId, Subscription>,
+    _subscriptions: FxHashMap<NotificationId, Subscription>,
 }
 
 impl NotificationList {
@@ -453,7 +454,7 @@ impl NotificationList {
         Self {
             notifications: VecDeque::new(),
             expanded: false,
-            _subscriptions: HashMap::new(),
+            _subscriptions: FxHashMap::default(),
         }
     }
 

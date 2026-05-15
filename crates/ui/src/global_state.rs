@@ -1,5 +1,5 @@
 use gpui::{App, ElementId, Entity, FocusHandle, Global, OwnedMenu};
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use crate::text::TextViewState;
 
@@ -14,7 +14,7 @@ pub struct GlobalState {
     /// Set of open popover IDs that use deferred rendering.
     /// When this set is not empty, we are inside at least one deferred context.
     /// This is used to prevent double-deferred elements which would cause GPUI to panic.
-    open_deferred_popovers: HashSet<ElementId>,
+    open_deferred_popovers: FxHashSet<ElementId>,
     /// Application menus storage
     app_menus: Vec<OwnedMenu>,
 }
@@ -23,7 +23,7 @@ impl GlobalState {
     pub(crate) fn new() -> Self {
         Self {
             text_view_state_stack: Vec::new(),
-            open_deferred_popovers: HashSet::new(),
+            open_deferred_popovers: FxHashSet::default(),
             app_menus: Vec::new(),
         }
     }

@@ -1,4 +1,5 @@
-use std::{collections::HashMap, fmt::Display};
+use std::fmt::Display;
+use rustc_hash::FxHashMap;
 
 use gpui::{Hsla, SharedString, hsla};
 use serde::{Deserialize, Deserializer, de::Error as _};
@@ -331,10 +332,10 @@ pub(crate) static DEFAULT_COLORS: once_cell::sync::Lazy<ShadcnColors> =
             .expect("failed to parse default-colors.json")
     });
 
-type ColorScales = HashMap<usize, ShadcnColor>;
+type ColorScales = FxHashMap<usize, ShadcnColor>;
 
 mod color_scales {
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap;
 
     use super::{ColorScales, ShadcnColor};
 
@@ -344,7 +345,7 @@ mod color_scales {
     where
         D: Deserializer<'de>,
     {
-        let mut map = HashMap::new();
+        let mut map = FxHashMap::default();
         for color in Vec::<ShadcnColor>::deserialize(deserializer)? {
             map.insert(color.scale, color);
         }

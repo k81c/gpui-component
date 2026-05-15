@@ -1,4 +1,4 @@
-use gpui::{Context, Point, Window};
+use gpui::{px, Context, Point, Window};
 
 use crate::input::{
     InputState, MoveDown, MoveEnd, MoveHome, MoveLeft, MovePageDown, MovePageUp, MoveRight,
@@ -204,7 +204,24 @@ impl InputState {
             return;
         };
 
-        let display_lines = (self.input_bounds.size.height / last_layout.line_height) as isize;
+        let point = self.text.offset_to_point(self.cursor());
+        let current_row = point.row;
+        let mut height_accum = px(0.);
+        let mut jump_rows = 0;
+
+        for row in (0..current_row).rev() {
+            let h = last_layout.layout_map.height_for_line(row);
+            if h > px(0.) {
+                let wrap_rows = self.display_map.visible_wrap_row_count_for_buffer_line(row) as isize;
+                height_accum += h;
+                jump_rows += wrap_rows;
+                if height_accum >= self.input_bounds.size.height {
+                    break;
+                }
+            }
+        }
+
+        let display_lines = jump_rows.max((self.input_bounds.size.height / last_layout.line_height) as isize);
         self.move_vertical(-display_lines, window, cx);
     }
 
@@ -222,7 +239,25 @@ impl InputState {
             return;
         };
 
-        let display_lines = (self.input_bounds.size.height / last_layout.line_height) as isize;
+        let point = self.text.offset_to_point(self.cursor());
+        let current_row = point.row;
+        let mut height_accum = px(0.);
+        let mut jump_rows = 0;
+        let total_rows = self.display_map.buffer_line_count();
+
+        for row in current_row + 1..total_rows {
+            let h = last_layout.layout_map.height_for_line(row);
+            if h > px(0.) {
+                let wrap_rows = self.display_map.visible_wrap_row_count_for_buffer_line(row) as isize;
+                height_accum += h;
+                jump_rows += wrap_rows;
+                if height_accum >= self.input_bounds.size.height {
+                    break;
+                }
+            }
+        }
+
+        let display_lines = jump_rows.max((self.input_bounds.size.height / last_layout.line_height) as isize);
         self.move_vertical(display_lines, window, cx);
     }
 

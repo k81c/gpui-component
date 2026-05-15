@@ -6,7 +6,7 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use smallvec::SmallVec;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ListItemMode {
@@ -34,7 +34,7 @@ pub struct ListItem {
     check_icon: Option<Icon>,
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
     on_mouse_down:
-        HashMap<MouseButton, Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>>,
+        FxHashMap<MouseButton, Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>>,
     on_mouse_enter: Option<Box<dyn Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static>>,
     suffix: Option<Box<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>>,
     children: SmallVec<[AnyElement; 2]>,
@@ -52,7 +52,7 @@ impl ListItem {
             secondary_selected: false,
             confirmed: false,
             on_click: None,
-            on_mouse_down: HashMap::new(),
+            on_mouse_down: FxHashMap::default(),
             on_mouse_enter: None,
             check_icon: None,
             suffix: None,

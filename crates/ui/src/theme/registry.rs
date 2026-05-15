@@ -1,9 +1,9 @@
+use rustc_hash::FxHashMap;
 use crate::{Theme, ThemeColor, ThemeConfig, ThemeMode, ThemeSet, highlighter::HighlightTheme};
 #[allow(unused)]
 use anyhow::Result;
 use gpui::{App, Global, SharedString};
 use std::{
-    collections::HashMap,
     path::PathBuf,
     rc::Rc,
     sync::{Arc, LazyLock},
@@ -11,9 +11,9 @@ use std::{
 
 const DEFAULT_THEME: &str = include_str!("./default-theme.json");
 pub(crate) static DEFAULT_THEME_COLORS: LazyLock<
-    HashMap<ThemeMode, (Arc<ThemeColor>, Arc<HighlightTheme>)>,
+    FxHashMap<ThemeMode, (Arc<ThemeColor>, Arc<HighlightTheme>)>,
 > = LazyLock::new(|| {
-    let mut colors = HashMap::new();
+    let mut colors = FxHashMap::default();
 
     let themes: Vec<ThemeConfig> = serde_json::from_str::<ThemeSet>(DEFAULT_THEME)
         .expect("Failed to parse themes/default.json")
@@ -75,8 +75,8 @@ pub(super) fn init(cx: &mut App) {
 #[derive(Default, Debug)]
 pub struct ThemeRegistry {
     themes_dir: PathBuf,
-    default_themes: HashMap<ThemeMode, Rc<ThemeConfig>>,
-    themes: HashMap<SharedString, Rc<ThemeConfig>>,
+    default_themes: FxHashMap<ThemeMode, Rc<ThemeConfig>>,
+    themes: FxHashMap<SharedString, Rc<ThemeConfig>>,
     has_custom_themes: bool,
 }
 
@@ -118,7 +118,7 @@ impl ThemeRegistry {
     }
 
     /// Returns a reference to the map of themes (including default themes).
-    pub fn themes(&self) -> &HashMap<SharedString, Rc<ThemeConfig>> {
+    pub fn themes(&self) -> &FxHashMap<SharedString, Rc<ThemeConfig>> {
         &self.themes
     }
 
@@ -136,7 +136,7 @@ impl ThemeRegistry {
     }
 
     /// Returns a reference to the map of default themes.
-    pub fn default_themes(&self) -> &HashMap<ThemeMode, Rc<ThemeConfig>> {
+    pub fn default_themes(&self) -> &FxHashMap<ThemeMode, Rc<ThemeConfig>> {
         &self.default_themes
     }
 

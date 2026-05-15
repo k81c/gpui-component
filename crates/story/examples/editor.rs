@@ -66,7 +66,8 @@ fn init() {
     );
 }
 
-pub struct Example {
+pub struct 
+Example {
     editor: Entity<InputState>,
     tree_state: Entity<TreeState>,
     go_to_line_state: Entity<InputState>,
@@ -693,7 +694,7 @@ impl Example {
 
         let editor = cx.new(|cx| {
             let mut editor = InputState::new(window, cx)
-                .code_editor(default_language.name().to_string())
+                .marked_editor(default_language.name().to_string())
                 .line_number(true)
                 .indent_guides(true)
                 .tab_size(TabSize {

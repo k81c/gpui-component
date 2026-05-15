@@ -1,13 +1,14 @@
+use rustc_hash::FxHashMap;
 use crate::highlighter::{HighlightTheme, LanguageRegistry};
 
 use anyhow::{Context, Result, anyhow};
 use gpui::{HighlightStyle, SharedString};
 
-use ropey::{ChunkCursor, Rope};
+use ropey::{ChunkCursor, LineType, Rope};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::BTreeSet,
     ops::{ControlFlow, Range},
     usize,
 };
@@ -27,7 +28,7 @@ pub struct SyntaxHighlighter {
     query: Option<Query>,
     /// The full injections query. This is used to build injection layers during parsing.
     injections_query: Option<Arc<Query>>,
-    injection_queries: HashMap<SharedString, Query>,
+    injection_queries: FxHashMap<SharedString, Query>,
 
     locals_pattern_index: usize,
     highlights_pattern_index: usize,
@@ -265,10 +266,30 @@ impl SyntaxHighlighter {
             }
         }
 
-        let injections_query = if !config.injections.is_empty() {
-            Query::new(&config.language, &config.injections)
-                .ok()
-                .map(Arc::new)
+        // Separate combined injection patterns into their own query.
+        // Combined injections (e.g., PHP's HTML text nodes) collect all matching
+        // ranges and parse them as a single document, so that opening/closing
+        // tags across injection boundaries are correctly matched.
+        let combined_injections_query = if !config.injections.is_empty() {
+            if let Ok(mut ciq) = Query::new(&config.language, &config.injections) {
+                let mut has_combined_query = false;
+                for pattern_index in 0..locals_pattern_index {
+                    let settings = query.property_settings(pattern_index);
+                    if settings.iter().any(|s| &*s.key == "injection.combined") {
+                        has_combined_query = true;
+                        query.disable_pattern(pattern_index);
+                    } else {
+                        ciq.disable_pattern(pattern_index);
+                    }
+                }
+                if has_combined_query {
+                    Some(Arc::new(ciq))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -291,13 +312,13 @@ impl SyntaxHighlighter {
             .collect();
 
         // Store the numeric ids for all of the special captures.
-        let injection_content_capture_index = injections_query.as_ref().and_then(|q| {
+        let injection_content_capture_index = combined_injections_query.as_ref().and_then(|q| {
             q.capture_names()
                 .iter()
                 .position(|name| *name == "injection.content")
                 .map(|i| i as u32)
         });
-        let injection_language_capture_index = injections_query.as_ref().and_then(|q| {
+        let injection_language_capture_index = combined_injections_query.as_ref().and_then(|q| {
             q.capture_names()
                 .iter()
                 .position(|name| *name == "injection.language")
@@ -318,7 +339,7 @@ impl SyntaxHighlighter {
             }
         }
 
-        let mut injection_queries = HashMap::new();
+        let mut injection_queries = FxHashMap::default();
         for inj_language in config.injection_languages.iter() {
             if let Some(inj_config) = LanguageRegistry::singleton().language(&inj_language) {
                 match Query::new(&inj_config.language, &inj_config.highlights) {
@@ -341,7 +362,7 @@ impl SyntaxHighlighter {
         Ok(Self {
             language: config.name.clone(),
             query: Some(query),
-            injections_query,
+            injections_query: combined_injections_query,
             injection_queries,
 
             locals_pattern_index,
@@ -377,6 +398,100 @@ impl SyntaxHighlighter {
     /// Returns a reference to the current text.
     pub fn text(&self) -> &Rope {
         &self.text
+    }
+
+    /// Returns heading levels by buffer line for markup languages.
+    ///
+    /// Each line maps to `Some(1..=6)` when the line is recognized as a heading,
+    /// otherwise `None`.
+    pub fn heading_levels(&self) -> Vec<Option<u8>> {
+        let mut levels = vec![None; self.text.len_lines(LineType::LF)];
+        let Some(tree) = self.tree.as_ref() else {
+            return levels;
+        };
+
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            let child_count = node.child_count();
+            for i in (0..child_count).rev() {
+                if let Some(child) = node.child(i as u32) {
+                    stack.push(child);
+                }
+            }
+
+            let Some(level) = Self::detect_heading_level(&self.language, &self.text, &node) else {
+                continue;
+            };
+            let row = node.start_position().row;
+            if row < levels.len() {
+                levels[row] = Some(level);
+            }
+        }
+
+        levels
+    }
+
+    fn detect_heading_level(lang: &str, text: &Rope, node: &tree_sitter::Node) -> Option<u8> {
+        let kind = node.kind();
+        let byte_range = node.start_byte()..node.end_byte();
+        let source = text.slice(byte_range).to_string();
+        let first_line = source.lines().next().unwrap_or_default().trim_start();
+
+        match lang {
+            "markdown" => {
+                if kind == "atx_heading" {
+                    return Self::count_heading_marker_prefix(first_line, '#');
+                }
+                if kind == "setext_heading" {
+                    let mut lines = source.lines();
+                    let _title = lines.next();
+                    let marker = lines.next().unwrap_or_default().trim();
+                    if marker.starts_with('=') {
+                        return Some(1);
+                    }
+                    if marker.starts_with('-') {
+                        return Some(2);
+                    }
+                }
+            }
+            "asciidoc" => {
+                return match kind {
+                    "document_title" => Some(1),
+                    "title1" => Some(2),
+                    "title2" => Some(3),
+                    "title3" => Some(4),
+                    "title4" => Some(5),
+                    "title5" => Some(6),
+                    _ => None,
+                };
+            }
+            "djot" => {
+                if kind.contains("heading") || kind == "section" {
+                    return Self::count_heading_marker_prefix(first_line, '#');
+                }
+            }
+            _ => {}
+        }
+
+        if kind.contains("heading") {
+            Self::count_heading_marker_prefix(first_line, '#')
+                .or_else(|| Self::count_heading_marker_prefix(first_line, '='))
+        } else {
+            None
+        }
+    }
+
+    fn count_heading_marker_prefix(line: &str, marker: char) -> Option<u8> {
+        let count = line.chars().take_while(|ch| *ch == marker).count();
+        if !(1..=6).contains(&count) {
+            return None;
+        }
+        let next = line.chars().nth(count);
+        if matches!(next, Some(' ' | '\t') | None) {
+            Some(count as u8)
+        } else {
+            None
+        }
     }
 
     /// Highlight the given text, returning a map from byte ranges to highlight captures.
@@ -502,8 +617,8 @@ impl SyntaxHighlighter {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&data.query, root_node, TextProvider(text));
 
-        let mut combined_ranges: HashMap<SharedString, Vec<tree_sitter::Range>> = HashMap::new();
-        let old_layer_trees: HashMap<_, _> = data
+        let mut combined_ranges: FxHashMap<SharedString, Vec<tree_sitter::Range>> = FxHashMap::default();
+        let old_layer_trees: FxHashMap<_, _> = data
             .old_layers
             .iter()
             .map(|layer| {
@@ -1016,6 +1131,7 @@ fn merge_highlight_style(style: &mut HighlightStyle, other: &HighlightStyle) {
 #[cfg(test)]
 mod tests {
     use gpui::Hsla;
+    use tree_sitter::{Parser, Query, QueryCursor};
 
     use super::*;
     use crate::Colorize as _;
@@ -1253,5 +1369,135 @@ $x = 1;
                 (60..65, clean),
             ],
         );
+    }
+
+    fn parse_tree(lang: &str, source: &str) -> Tree {
+        let config = LanguageRegistry::singleton()
+            .language(lang)
+            .unwrap_or_else(|| panic!("language config not found: {lang}"));
+        let mut parser = Parser::new();
+        parser.set_language(&config.language).unwrap();
+        parser.parse(source, None).unwrap()
+    }
+
+    fn capture_rows_with_first_matching_query(
+        lang: &str,
+        source: &str,
+        candidates: &[&str],
+        capture_name: &str,
+    ) -> Vec<usize> {
+        let config = LanguageRegistry::singleton()
+            .language(lang)
+            .unwrap_or_else(|| panic!("language config not found: {lang}"));
+        let tree = parse_tree(lang, source);
+        let rope = Rope::from_str(source);
+
+        for query_source in candidates {
+            let Ok(query) = Query::new(&config.language, query_source) else {
+                continue;
+            };
+            let capture_index = query
+                .capture_names()
+                .iter()
+                .position(|name| *name == capture_name)
+                .map(|ix| ix as u32)
+                .unwrap_or(0);
+
+            let mut cursor = QueryCursor::new();
+            let mut matches = cursor.matches(&query, tree.root_node(), TextProvider(&rope));
+            let mut rows = Vec::new();
+
+            while let Some(query_match) = matches.next() {
+                for cap in query_match.captures {
+                    if cap.index == capture_index {
+                        rows.push(cap.node.start_position().row);
+                    }
+                }
+            }
+
+            if !rows.is_empty() {
+                rows.sort_unstable();
+                rows.dedup();
+                return rows;
+            }
+        }
+
+        Vec::new()
+    }
+
+    #[test]
+    #[cfg(feature = "tree-sitter-markdown")]
+    fn test_markdown_parse_and_capture_headings() {
+        let source = "# H1\nText\n## H2\nUnder\n---\n```\n# not\n```\n";
+        let tree = parse_tree("markdown", source);
+        assert!(!tree.root_node().has_error());
+
+        let rows = capture_rows_with_first_matching_query(
+            "markdown",
+            source,
+            &[
+                "[(atx_heading) (setext_heading)] @heading",
+                "[(atx_h1_marker) (atx_h2_marker) (setext_h2_underline)] @heading",
+            ],
+            "heading",
+        );
+        assert_eq!(rows, vec![0, 2, 3]);
+    }
+
+    #[test]
+    #[cfg(feature = "tree-sitter-asciidoc")]
+    fn test_asciidoc_parse_and_capture_headings() {
+        let source = "= Title\n\n== Section\nParagraph\n";
+        let tree = parse_tree("asciidoc", source);
+        assert!(!tree.root_node().has_error());
+
+        let rows = capture_rows_with_first_matching_query(
+            "asciidoc",
+            source,
+            &["[(document_title) (title1) (title2) (title3) (title4) (title5)] @heading"],
+            "heading",
+        );
+        assert_eq!(rows, vec![0, 2]);
+    }
+
+    #[test]
+    #[cfg(feature = "tree-sitter-djot")]
+    fn test_djot_parse_and_capture_headings() {
+        let source = "# Title\nBody\n## Sub\n```\n# not heading\n```\n";
+        let tree = parse_tree("djot", source);
+        assert!(!tree.root_node().has_error());
+
+        let rows = capture_rows_with_first_matching_query(
+            "djot",
+            source,
+            &["[(heading) (section)] @heading", "[(atx_heading)] @heading"],
+            "heading",
+        );
+        assert_eq!(rows, vec![0, 2]);
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "tree-sitter-markdown",
+        feature = "tree-sitter-asciidoc",
+        feature = "tree-sitter-djot"
+    ))]
+    fn test_heading_levels_alignment_multilang() {
+        let markdown = Rope::from_str("# A\nB\n## C\n");
+        let mut md = SyntaxHighlighter::new("markdown");
+        assert!(md.update(None, &markdown, None));
+        assert_eq!(md.heading_levels(), vec![Some(1), None, Some(2), None]);
+
+        let asciidoc = Rope::from_str("= A\n\n== C\n");
+        let mut adoc = SyntaxHighlighter::new("asciidoc");
+        assert_eq!(adoc.language().as_ref(), "asciidoc");
+        assert!(adoc.update(None, &asciidoc, None));
+        assert_eq!(adoc.heading_levels(), vec![Some(1), None, Some(2), None]);
+
+        let djot = Rope::from_str("# A\nB\n## C\n");
+        let mut dj = SyntaxHighlighter::new("djot");
+        assert_eq!(dj.language().as_ref(), "djot");
+        assert!(dj.update(None, &djot, None));
+        assert_eq!(dj.heading_levels(), vec![Some(1), None, Some(2), None]);
     }
 }

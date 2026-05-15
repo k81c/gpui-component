@@ -1,4 +1,5 @@
-use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::Arc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
+use rustc_hash::FxHashSet;
 
 use gpui::{
     AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement, RenderOnce,
@@ -83,7 +84,7 @@ impl Sizable for Accordion {
 
 impl RenderOnce for Accordion {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let open_ixs = Rc::new(RefCell::new(HashSet::new()));
+        let open_ixs = Rc::new(RefCell::new(FxHashSet::default()));
         let is_multiple = self.multiple;
 
         v_flex()

@@ -1,14 +1,15 @@
-use std::ops::Range;
 use gpui::Half;
+use std::ops::Range;
 
 use gpui::{
-    App, Font, LineFragment, Pixels, Point, ShapedLine, Size, TextAlign, Window, point, px,
-    size,
+    App, Font, LineFragment, Pixels, Point, ShapedLine, Size, TextAlign, Window, point, px, size,
 };
 use ropey::Rope;
 use smallvec::SmallVec;
 
-use crate::input::{LastLayout, Point as TreeSitterPoint, RopeExt, WhitespaceIndicators};
+use crate::input::{
+    LastLayout, Point as TreeSitterPoint, RopeExt, WhitespaceIndicators,
+};
 
 /// A line with soft wrapped lines info.
 #[derive(Debug, Clone)]
@@ -420,10 +421,26 @@ impl LineLayout {
     /// - When `line_end_affinity` is true, an offset at a soft wrap boundary is placed at
     ///   the end of the current visual line rather than the start of the next one.
     /// - The return value is relative to the top-left corner of this line layout, start from (0, 0)
+    #[allow(dead_code)]
     pub(crate) fn position_for_index(
         &self,
         offset: usize,
         last_layout: &LastLayout,
+        line_end_affinity: bool,
+    ) -> Option<Point<Pixels>> {
+        self.position_for_index_with_line_height(
+            offset,
+            last_layout,
+            last_layout.line_height,
+            line_end_affinity,
+        )
+    }
+
+    pub(crate) fn position_for_index_with_line_height(
+        &self,
+        offset: usize,
+        last_layout: &LastLayout,
+        line_height: Pixels,
         line_end_affinity: bool,
     ) -> Option<Point<Pixels>> {
         let mut acc_len = 0;
@@ -453,7 +470,7 @@ impl LineLayout {
             // Always advance by actual line length. The last line gets +1 so the
             // cursor can be placed after the final character.
             acc_len += if is_last { line.len + 1 } else { line.len };
-            offset_y += last_layout.line_height;
+            offset_y += line_height;
         }
 
         None
@@ -487,17 +504,27 @@ impl LineLayout {
     ///
     /// The `pos` is relative to the top-left corner of this line layout, start from (0, 0)
     /// The return value is a local byte index in this line layout, start from 0.
+    #[allow(dead_code)]
     pub(crate) fn closest_index_for_position(
         &self,
         pos: Point<Pixels>,
         last_layout: &LastLayout,
+    ) -> Option<usize> {
+        self.closest_index_for_position_with_line_height(pos, last_layout, last_layout.line_height)
+    }
+
+    pub(crate) fn closest_index_for_position_with_line_height(
+        &self,
+        pos: Point<Pixels>,
+        last_layout: &LastLayout,
+        line_height: Pixels,
     ) -> Option<usize> {
         let mut offset = 0;
         let mut line_top = px(0.);
         let x_offset = last_layout.alignment_offset(self.longest_width);
         for (i, line) in self.wrapped_lines.iter().enumerate() {
             let is_last = i + 1 == self.wrapped_lines.len();
-            let line_bottom = line_top + last_layout.line_height;
+            let line_bottom = line_top + line_height;
             if pos.y >= line_top && pos.y < line_bottom {
                 let mut ix = line.closest_index_for_x(pos.x - x_offset);
                 if !is_last && ix == line.text.len() {
@@ -515,16 +542,26 @@ impl LineLayout {
         None
     }
 
+    #[allow(dead_code)]
     pub(crate) fn index_for_position(
         &self,
         pos: Point<Pixels>,
         last_layout: &LastLayout,
     ) -> Option<usize> {
+        self.index_for_position_with_line_height(pos, last_layout, last_layout.line_height)
+    }
+
+    pub(crate) fn index_for_position_with_line_height(
+        &self,
+        pos: Point<Pixels>,
+        last_layout: &LastLayout,
+        line_height: Pixels,
+    ) -> Option<usize> {
         let mut offset = 0;
         let mut line_top = px(0.);
         let x_offset = last_layout.alignment_offset(self.longest_width);
         for line in self.wrapped_lines.iter() {
-            let line_bottom = line_top + last_layout.line_height;
+            let line_bottom = line_top + line_height;
             if pos.y >= line_top && pos.y < line_bottom {
                 let ix = line.index_for_x(pos.x - x_offset)?;
                 return Some(offset + ix);
@@ -586,6 +623,7 @@ mod tests {
     use super::*;
     use std::rc::Rc;
 
+    use crate::input::{LayoutMap, LineMetrics};
     use gpui::{Boundary, FontFeatures, FontStyle, FontWeight, px};
 
     #[test]
@@ -814,6 +852,8 @@ mod tests {
             visible_range_offset: 0..0,
             lines: Rc::new(vec![]),
             line_height: px(20.),
+            line_metrics: Rc::new(vec![]),
+            layout_map: LayoutMap::default(),
             wrap_width: None,
             line_number_width: px(0.),
             cursor_bounds: None,

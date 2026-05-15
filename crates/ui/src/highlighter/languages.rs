@@ -8,6 +8,8 @@ pub enum Language {
     Plain,
     #[cfg(feature = "tree-sitter-astro")]
     Astro,
+    #[cfg(feature = "tree-sitter-asciidoc")]
+    AsciiDoc,
     #[cfg(feature = "tree-sitter-bash")]
     Bash,
     #[cfg(feature = "tree-sitter-c")]
@@ -22,6 +24,8 @@ pub enum Language {
     Css,
     #[cfg(feature = "tree-sitter-diff")]
     Diff,
+    #[cfg(feature = "tree-sitter-djot")]
+    Djot,
     #[cfg(feature = "tree-sitter-ejs")]
     Ejs,
     #[cfg(feature = "tree-sitter-elixir")]
@@ -97,6 +101,8 @@ impl Language {
             Self::Plain => "text",
             #[cfg(feature = "tree-sitter-astro")]
             Self::Astro => "astro",
+            #[cfg(feature = "tree-sitter-asciidoc")]
+            Self::AsciiDoc => "asciidoc",
             #[cfg(feature = "tree-sitter-bash")]
             Self::Bash => "bash",
             #[cfg(feature = "tree-sitter-c")]
@@ -111,6 +117,8 @@ impl Language {
             Self::Css => "css",
             #[cfg(feature = "tree-sitter-diff")]
             Self::Diff => "diff",
+            #[cfg(feature = "tree-sitter-djot")]
+            Self::Djot => "djot",
             #[cfg(feature = "tree-sitter-ejs")]
             Self::Ejs => "ejs",
             #[cfg(feature = "tree-sitter-elixir")]
@@ -181,6 +189,8 @@ impl Language {
             "json" | "jsonc" => Some(Self::Json),
             #[cfg(feature = "tree-sitter-astro")]
             "astro" => Some(Self::Astro),
+            #[cfg(feature = "tree-sitter-asciidoc")]
+            "asciidoc" | "adoc" => Some(Self::AsciiDoc),
             #[cfg(feature = "tree-sitter-bash")]
             "bash" | "sh" => Some(Self::Bash),
             #[cfg(feature = "tree-sitter-c")]
@@ -195,6 +205,8 @@ impl Language {
             "css" | "scss" => Some(Self::Css),
             #[cfg(feature = "tree-sitter-diff")]
             "diff" => Some(Self::Diff),
+            #[cfg(feature = "tree-sitter-djot")]
+            "djot" => Some(Self::Djot),
             #[cfg(feature = "tree-sitter-ejs")]
             "ejs" => Some(Self::Ejs),
             #[cfg(feature = "tree-sitter-elixir")]
@@ -370,243 +382,255 @@ impl Language {
     /// (language, query, injection, locals)
     pub(super) fn config(&self) -> LanguageConfig {
         let (language, query, injection, locals) = match self {
-            Self::Plain => (tree_sitter_json::LANGUAGE, "", "", ""),
+            Self::Plain => (tree_sitter_json::LANGUAGE.into(), "", "", ""),
             Self::Json => (
-                tree_sitter_json::LANGUAGE,
+                tree_sitter_json::LANGUAGE.into(),
                 include_str!("languages/json/highlights.scm"),
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-markdown")]
             Self::Markdown => (
-                tree_sitter_md::LANGUAGE,
+                tree_sitter_md::LANGUAGE.into(),
                 include_str!("languages/markdown/highlights.scm"),
                 include_str!("languages/markdown/injections.scm"),
                 "",
             ),
             #[cfg(feature = "tree-sitter-markdown")]
             Self::MarkdownInline => (
-                tree_sitter_md::INLINE_LANGUAGE,
+                tree_sitter_md::INLINE_LANGUAGE.into(),
                 include_str!("languages/markdown_inline/highlights.scm"),
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-toml")]
             Self::Toml => (
-                tree_sitter_toml_ng::LANGUAGE,
+                tree_sitter_toml_ng::LANGUAGE.into(),
                 tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-yaml")]
             Self::Yaml => (
-                tree_sitter_yaml::LANGUAGE,
+                tree_sitter_yaml::LANGUAGE.into(),
                 tree_sitter_yaml::HIGHLIGHTS_QUERY,
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-rust")]
             Self::Rust => (
-                tree_sitter_rust::LANGUAGE,
+                tree_sitter_rust::LANGUAGE.into(),
                 include_str!("languages/rust/highlights.scm"),
                 include_str!("languages/rust/injections.scm"),
                 "",
             ),
             #[cfg(feature = "tree-sitter-go")]
             Self::Go => (
-                tree_sitter_go::LANGUAGE,
+                tree_sitter_go::LANGUAGE.into(),
                 include_str!("languages/go/highlights.scm"),
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-c")]
             Self::C => (
-                tree_sitter_c::LANGUAGE,
+                tree_sitter_c::LANGUAGE.into(),
                 tree_sitter_c::HIGHLIGHT_QUERY,
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-cpp")]
             Self::Cpp => (
-                tree_sitter_cpp::LANGUAGE,
+                tree_sitter_cpp::LANGUAGE.into(),
                 tree_sitter_cpp::HIGHLIGHT_QUERY,
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-javascript")]
             Self::JavaScript => (
-                tree_sitter_javascript::LANGUAGE,
+                tree_sitter_javascript::LANGUAGE.into(),
                 include_str!("languages/javascript/highlights.scm"),
                 include_str!("languages/javascript/injections.scm"),
                 tree_sitter_javascript::LOCALS_QUERY,
             ),
             #[cfg(feature = "tree-sitter-jsdoc")]
             Self::JsDoc => (
-                tree_sitter_jsdoc::LANGUAGE,
+                tree_sitter_jsdoc::LANGUAGE.into(),
                 tree_sitter_jsdoc::HIGHLIGHTS_QUERY,
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-zig")]
             Self::Zig => (
-                tree_sitter_zig::LANGUAGE,
+                tree_sitter_zig::LANGUAGE.into(),
                 include_str!("languages/zig/highlights.scm"),
                 include_str!("languages/zig/injections.scm"),
                 "",
             ),
             #[cfg(feature = "tree-sitter-java")]
             Self::Java => (
-                tree_sitter_java::LANGUAGE,
+                tree_sitter_java::LANGUAGE.into(),
                 tree_sitter_java::HIGHLIGHTS_QUERY,
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-python")]
             Self::Python => (
-                tree_sitter_python::LANGUAGE,
+                tree_sitter_python::LANGUAGE.into(),
                 tree_sitter_python::HIGHLIGHTS_QUERY,
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-ruby")]
             Self::Ruby => (
-                tree_sitter_ruby::LANGUAGE,
+                tree_sitter_ruby::LANGUAGE.into(),
                 tree_sitter_ruby::HIGHLIGHTS_QUERY,
                 "",
                 tree_sitter_ruby::LOCALS_QUERY,
             ),
             #[cfg(feature = "tree-sitter-bash")]
             Self::Bash => (
-                tree_sitter_bash::LANGUAGE,
+                tree_sitter_bash::LANGUAGE.into(),
                 tree_sitter_bash::HIGHLIGHT_QUERY,
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-html")]
             Self::Html => (
-                tree_sitter_html::LANGUAGE,
+                tree_sitter_html::LANGUAGE.into(),
                 include_str!("languages/html/highlights.scm"),
                 include_str!("languages/html/injections.scm"),
                 "",
             ),
             #[cfg(feature = "tree-sitter-css")]
             Self::Css => (
-                tree_sitter_css::LANGUAGE,
+                tree_sitter_css::LANGUAGE.into(),
                 tree_sitter_css::HIGHLIGHTS_QUERY,
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-swift")]
-            Self::Swift => (tree_sitter_swift::LANGUAGE, "", "", ""),
+            Self::Swift => (tree_sitter_swift::LANGUAGE.into(), "", "", ""),
             #[cfg(feature = "tree-sitter-scala")]
             Self::Scala => (
-                tree_sitter_scala::LANGUAGE,
+                tree_sitter_scala::LANGUAGE.into(),
                 tree_sitter_scala::HIGHLIGHTS_QUERY,
                 "",
                 tree_sitter_scala::LOCALS_QUERY,
             ),
             #[cfg(feature = "tree-sitter-sql")]
             Self::Sql => (
-                tree_sitter_sequel::LANGUAGE,
+                tree_sitter_sequel::LANGUAGE.into(),
                 tree_sitter_sequel::HIGHLIGHTS_QUERY,
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-csharp")]
-            Self::CSharp => (tree_sitter_c_sharp::LANGUAGE, "", "", ""),
+            Self::CSharp => (tree_sitter_c_sharp::LANGUAGE.into(), "", "", ""),
             #[cfg(feature = "tree-sitter-graphql")]
-            Self::GraphQL => (tree_sitter_graphql::LANGUAGE, "", "", ""),
+            Self::GraphQL => (tree_sitter_graphql::LANGUAGE.into(), "", "", ""),
             #[cfg(feature = "tree-sitter-proto")]
-            Self::Proto => (tree_sitter_proto::LANGUAGE, "", "", ""),
+            Self::Proto => (tree_sitter_proto::LANGUAGE.into(), "", "", ""),
             #[cfg(feature = "tree-sitter-make")]
             Self::Make => (
-                tree_sitter_make::LANGUAGE,
+                tree_sitter_make::LANGUAGE.into(),
                 tree_sitter_make::HIGHLIGHTS_QUERY,
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-cmake")]
-            Self::CMake => (tree_sitter_cmake::LANGUAGE, "", "", ""),
+            Self::CMake => (tree_sitter_cmake::LANGUAGE.into(), "", "", ""),
             #[cfg(feature = "tree-sitter-typescript")]
             Self::TypeScript => (
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 include_str!("languages/typescript/highlights.scm"),
                 include_str!("languages/javascript/injections.scm"),
                 tree_sitter_typescript::LOCALS_QUERY,
             ),
             #[cfg(feature = "tree-sitter-tsx")]
             Self::Tsx => (
-                tree_sitter_typescript::LANGUAGE_TSX,
+                tree_sitter_typescript::LANGUAGE_TSX.into(),
                 tree_sitter_typescript::HIGHLIGHTS_QUERY,
                 "",
                 tree_sitter_typescript::LOCALS_QUERY,
             ),
             #[cfg(feature = "tree-sitter-diff")]
             Self::Diff => (
-                tree_sitter_diff::LANGUAGE,
+                tree_sitter_diff::LANGUAGE.into(),
                 tree_sitter_diff::HIGHLIGHTS_QUERY,
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-elixir")]
             Self::Elixir => (
-                tree_sitter_elixir::LANGUAGE,
+                tree_sitter_elixir::LANGUAGE.into(),
                 tree_sitter_elixir::HIGHLIGHTS_QUERY,
                 tree_sitter_elixir::INJECTIONS_QUERY,
                 "",
             ),
             #[cfg(feature = "tree-sitter-erb")]
             Self::Erb => (
-                tree_sitter_embedded_template::LANGUAGE,
+                tree_sitter_embedded_template::LANGUAGE.into(),
                 tree_sitter_embedded_template::HIGHLIGHTS_QUERY,
                 tree_sitter_embedded_template::INJECTIONS_EJS_QUERY,
                 "",
             ),
             #[cfg(feature = "tree-sitter-ejs")]
             Self::Ejs => (
-                tree_sitter_embedded_template::LANGUAGE,
+                tree_sitter_embedded_template::LANGUAGE.into(),
                 tree_sitter_embedded_template::HIGHLIGHTS_QUERY,
                 tree_sitter_embedded_template::INJECTIONS_EJS_QUERY,
                 "",
             ),
             #[cfg(feature = "tree-sitter-php")]
             Self::Php => (
-                tree_sitter_php::LANGUAGE_PHP,
+                tree_sitter_php::LANGUAGE_PHP.into(),
                 tree_sitter_php::HIGHLIGHTS_QUERY,
                 include_str!("languages/php/injections.scm"),
                 "",
             ),
             #[cfg(feature = "tree-sitter-astro")]
             Self::Astro => (
-                tree_sitter_astro_next::LANGUAGE,
+                tree_sitter_astro_next::LANGUAGE.into(),
                 tree_sitter_astro_next::HIGHLIGHTS_QUERY,
                 tree_sitter_astro_next::INJECTIONS_QUERY,
                 "",
             ),
+            #[cfg(feature = "tree-sitter-asciidoc")]
+            Self::AsciiDoc => (
+                tree_sitter_asciidoc::language(),
+                include_str!("languages/asciidoc/highlights.scm"),
+                "",
+                "",
+            ),
             #[cfg(feature = "tree-sitter-kotlin")]
             Self::Kotlin => (
-                tree_sitter_kotlin_sg::LANGUAGE,
+                tree_sitter_kotlin_sg::LANGUAGE.into(),
                 include_str!("languages/kotlin/highlights.scm"),
                 "",
                 "",
             ),
             #[cfg(feature = "tree-sitter-lua")]
             Self::Lua => (
-                tree_sitter_lua::LANGUAGE,
+                tree_sitter_lua::LANGUAGE.into(),
                 include_str!("languages/lua/highlights.scm"),
                 tree_sitter_lua::INJECTIONS_QUERY,
                 tree_sitter_lua::LOCALS_QUERY,
             ),
             #[cfg(feature = "tree-sitter-svelte")]
             Self::Svelte => (
-                tree_sitter_svelte_next::LANGUAGE,
+                tree_sitter_svelte_next::LANGUAGE.into(),
                 tree_sitter_svelte_next::HIGHLIGHTS_QUERY,
                 tree_sitter_svelte_next::INJECTIONS_QUERY,
                 tree_sitter_svelte_next::LOCALS_QUERY,
             ),
+            #[cfg(feature = "tree-sitter-djot")]
+            Self::Djot => (
+                tree_sitter_djot::language(),
+                include_str!("languages/djot/highlights.scm"),
+                "",
+                "",
+            ),
         };
-
-        let language = tree_sitter::Language::new(language);
 
         LanguageConfig::new(
             self.name(),
@@ -658,6 +682,10 @@ mod tests {
         assert_eq!(Language::Tsx.name(), "tsx");
         #[cfg(feature = "tree-sitter-diff")]
         assert_eq!(Language::Diff.name(), "diff");
+        #[cfg(feature = "tree-sitter-djot")]
+        assert_eq!(Language::Djot.name(), "djot");
+        #[cfg(feature = "tree-sitter-asciidoc")]
+        assert_eq!(Language::AsciiDoc.name(), "asciidoc");
         #[cfg(feature = "tree-sitter-elixir")]
         assert_eq!(Language::Elixir.name(), "elixir");
         #[cfg(feature = "tree-sitter-erb")]
@@ -686,6 +714,16 @@ mod tests {
         assert_eq!(Language::from_name("ts"), Some(Language::TypeScript));
         #[cfg(not(feature = "tree-sitter-typescript"))]
         assert_eq!(Language::from_name("ts"), None);
+
+        #[cfg(feature = "tree-sitter-djot")]
+        assert_eq!(Language::from_name("djot"), Some(Language::Djot));
+        #[cfg(not(feature = "tree-sitter-djot"))]
+        assert_eq!(Language::from_name("djot"), None);
+
+        #[cfg(feature = "tree-sitter-asciidoc")]
+        assert_eq!(Language::from_name("adoc"), Some(Language::AsciiDoc));
+        #[cfg(not(feature = "tree-sitter-asciidoc"))]
+        assert_eq!(Language::from_name("adoc"), None);
 
         assert_eq!(Language::from_str("unknown"), Language::Plain);
     }

@@ -248,6 +248,73 @@ pub(crate) struct WhitespaceIndicators {
 }
 
 #[derive(Clone)]
+pub(crate) enum MarkedLineKind {
+    Text,
+    Heading(u8),
+}
+
+#[derive(Clone)]
+pub(crate) struct LineMetrics {
+    pub(crate) kind: MarkedLineKind,
+    pub(crate) font_size: Pixels,
+    pub(crate) line_height: Pixels,
+    pub(crate) spacing_before: Pixels,
+    pub(crate) spacing_after: Pixels,
+}
+
+impl LineMetrics {
+    pub(crate) fn plain(font_size: Pixels, line_height: Pixels) -> Self {
+        Self {
+            kind: MarkedLineKind::Text,
+            font_size,
+            line_height,
+            spacing_before: px(0.),
+            spacing_after: px(0.),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn row_height(&self, wrap_rows: usize) -> Pixels {
+        self.spacing_before + self.line_height * wrap_rows + self.spacing_after
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct LayoutMap {
+    pub(crate) origins: Rc<Vec<Pixels>>,
+    pub(crate) heights: Rc<Vec<Pixels>>,
+    pub(crate) total_height: Pixels,
+}
+
+impl LayoutMap {
+    pub(crate) fn new(line_heights: Vec<Pixels>) -> Self {
+        let mut origins = Vec::with_capacity(line_heights.len());
+        let mut total_height = px(0.);
+
+        for height in &line_heights {
+            origins.push(total_height);
+            total_height += *height;
+        }
+
+        Self {
+            origins: Rc::new(origins),
+            heights: Rc::new(line_heights),
+            total_height,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn origin_for_line(&self, line: usize) -> Pixels {
+        self.origins.get(line).copied().unwrap_or(self.total_height)
+    }
+
+    #[inline]
+    pub(crate) fn height_for_line(&self, line: usize) -> Pixels {
+        self.heights.get(line).copied().unwrap_or(px(0.))
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct LastLayout {
     /// The visible range (no wrap) of lines in the viewport, the value is row (0-based) index.
     /// This is the buffer line range that encompasses all visible lines.
@@ -265,6 +332,10 @@ pub(super) struct LastLayout {
     pub(super) lines: Rc<Vec<LineLayout>>,
     /// The line_height of text layout, this will change will InputElement painted.
     pub(super) line_height: Pixels,
+    /// Per visible buffer-line metrics. In normal editor modes every entry equals line_height.
+    pub(crate) line_metrics: Rc<Vec<LineMetrics>>,
+    /// Prefix-sum layout information for all buffer lines.
+    pub(crate) layout_map: LayoutMap,
     /// The wrap width of text layout, this will change will InputElement painted.
     pub(super) wrap_width: Option<Pixels>,
     /// The line number area width of text layout, if not line number, this will be 0px.
@@ -294,6 +365,20 @@ impl LastLayout {
             TextAlign::Center => (self.content_width - line_width).half().max(px(0.)),
             TextAlign::Right => (self.content_width - line_width).max(px(0.)),
         }
+    }
+
+    #[inline]
+    pub(crate) fn line_metrics_for_visible_index(&self, ix: usize) -> &LineMetrics {
+        self.line_metrics.get(ix).unwrap_or_else(|| {
+            self.line_metrics
+                .first()
+                .expect("line metrics should exist")
+        })
+    }
+
+    #[inline]
+    pub(crate) fn line_height_for_visible_index(&self, ix: usize) -> Pixels {
+        self.line_metrics_for_visible_index(ix).line_height
     }
 }
 
@@ -529,6 +614,17 @@ impl InputState {
         self
     }
 
+    /// Set Input to use [`InputMode::MarkedEditor`] mode.
+    ///
+    /// This mode is based on Code Editor behavior and uses Markdown highlighting by default,
+    /// while enabling per-line layout metrics for Markdown blocks such as headings.
+    pub fn marked_editor(mut self, language: impl Into<SharedString>) -> Self {
+        let language: SharedString = language.into();
+        self.mode = InputMode::marked_editor(language);
+        self.searchable = true;
+        self
+    }
+
     /// Sets whether the context menu that shows on right-click is enabled.
     ///
     /// The context menu is enabled by default.
@@ -556,7 +652,9 @@ impl InputState {
     /// Default: true
     pub fn folding(mut self, folding: bool) -> Self {
         debug_assert!(self.mode.is_code_editor());
-        if let InputMode::CodeEditor { folding: f, .. } = &mut self.mode {
+        if let InputMode::CodeEditor { folding: f, .. }
+        | InputMode::MarkedEditor { folding: f, .. } = &mut self.mode
+        {
             *f = folding;
         }
         self
@@ -567,7 +665,9 @@ impl InputState {
     /// When disabling, all existing folds are cleared.
     pub fn set_folding(&mut self, folding: bool, _: &mut Window, cx: &mut Context<Self>) {
         debug_assert!(self.mode.is_code_editor());
-        if let InputMode::CodeEditor { folding: f, .. } = &mut self.mode {
+        if let InputMode::CodeEditor { folding: f, .. }
+        | InputMode::MarkedEditor { folding: f, .. } = &mut self.mode
+        {
             *f = folding;
         }
         if !folding {
@@ -579,7 +679,9 @@ impl InputState {
     /// Set enable/disable line number, only for [`InputMode::CodeEditor`] mode.
     pub fn line_number(mut self, line_number: bool) -> Self {
         debug_assert!(self.mode.is_code_editor() && self.mode.is_multi_line());
-        if let InputMode::CodeEditor { line_number: l, .. } = &mut self.mode {
+        if let InputMode::CodeEditor { line_number: l, .. }
+        | InputMode::MarkedEditor { line_number: l, .. } = &mut self.mode
+        {
             *l = line_number;
         }
         self
@@ -588,7 +690,9 @@ impl InputState {
     /// Set line number, only for [`InputMode::CodeEditor`] mode.
     pub fn set_line_number(&mut self, line_number: bool, _: &mut Window, cx: &mut Context<Self>) {
         debug_assert!(self.mode.is_code_editor() && self.mode.is_multi_line());
-        if let InputMode::CodeEditor { line_number: l, .. } = &mut self.mode {
+        if let InputMode::CodeEditor { line_number: l, .. }
+        | InputMode::MarkedEditor { line_number: l, .. } = &mut self.mode
+        {
             *l = line_number;
         }
         cx.notify();
@@ -601,9 +705,9 @@ impl InputState {
     /// default: 2
     pub fn rows(mut self, rows: usize) -> Self {
         match &mut self.mode {
-            InputMode::PlainText { rows: r, .. } | InputMode::CodeEditor { rows: r, .. } => {
-                *r = rows
-            }
+            InputMode::PlainText { rows: r, .. }
+            | InputMode::CodeEditor { rows: r, .. }
+            | InputMode::MarkedEditor { rows: r, .. } => *r = rows,
             InputMode::AutoGrow {
                 max_rows: max_r,
                 rows: r,
@@ -633,6 +737,18 @@ impl InputState {
                 *highlighter.borrow_mut() = None;
                 parse_task.borrow_mut().take();
             }
+            InputMode::MarkedEditor {
+                language,
+                highlighter,
+                parse_task,
+                heading_levels,
+                ..
+            } => {
+                *language = new_language.into();
+                *highlighter.borrow_mut() = None;
+                parse_task.borrow_mut().take();
+                heading_levels.borrow_mut().clear();
+            }
             _ => {}
         }
         cx.notify();
@@ -647,6 +763,16 @@ impl InputState {
             } => {
                 *highlighter.borrow_mut() = None;
                 parse_task.borrow_mut().take();
+            }
+            InputMode::MarkedEditor {
+                highlighter,
+                parse_task,
+                heading_levels,
+                ..
+            } => {
+                *highlighter.borrow_mut() = None;
+                parse_task.borrow_mut().take();
+                heading_levels.borrow_mut().clear();
             }
             _ => {}
         }
@@ -688,19 +814,27 @@ impl InputState {
         let Some(last_layout) = &self.last_layout else {
             return (0, 0, None);
         };
-        let line_height = last_layout.line_height;
-
         let mut y_offset = last_layout.visible_top;
         for (vi, line) in last_layout.lines.iter().enumerate() {
+            let line_metrics = last_layout.line_metrics_for_visible_index(vi);
+            let line_height = line_metrics.line_height;
             let prev_lines_offset = last_layout.visible_line_byte_offsets[vi];
             let local_offset = offset.saturating_sub(prev_lines_offset);
-            if let Some(pos) = line.position_for_index(local_offset, last_layout, false) {
+            if let Some(pos) = line.position_for_index_with_line_height(
+                local_offset,
+                last_layout,
+                line_height,
+                false,
+            ) {
                 let sub_line_index = (pos.y / line_height) as usize;
-                let adjusted_pos = point(pos.x + last_layout.line_number_width, pos.y + y_offset);
+                let adjusted_pos = point(
+                    pos.x + last_layout.line_number_width,
+                    pos.y + y_offset + line_metrics.spacing_before,
+                );
                 return (vi, sub_line_index, Some(adjusted_pos));
             }
 
-            y_offset += line.size(line_height).height;
+            y_offset += line_metrics.row_height(line.wrapped_lines.len());
         }
         (0, 0, None)
     }
@@ -1558,22 +1692,28 @@ impl InputState {
 
         let mut scroll_offset = self.scroll_handle.offset();
         let was_offset = scroll_offset;
-        let line_height = last_layout.line_height;
 
         let point = self.text.offset_to_point(offset);
 
         let row = point.row;
 
-        let mut row_offset_y = px(0.);
-        for (ix, _wrap_line) in self.display_map.lines().iter().enumerate() {
-            if ix == row {
-                break;
-            }
-
-            // Only accumulate height for visible (non-folded) wrap rows
-            let visible_wrap_rows = self.display_map.visible_wrap_row_count_for_buffer_line(ix);
-            row_offset_y += line_height * visible_wrap_rows;
-        }
+        let mut row_offset_y = last_layout.layout_map.origin_for_line(row);
+        let line_height = last_layout
+            .visible_buffer_lines
+            .iter()
+            .position(|line| *line == row)
+            .map(|ix| last_layout.line_height_for_visible_index(ix))
+            .unwrap_or(last_layout.line_height);
+        let spacing_before = last_layout
+            .visible_buffer_lines
+            .iter()
+            .position(|line| *line == row)
+            .map(|ix| {
+                last_layout
+                    .line_metrics_for_visible_index(ix)
+                    .spacing_before
+            })
+            .unwrap_or(px(0.));
 
         // For Right alignment use 0 margin: the cursor indicator is clamped inside bounds
         // in layout_cursor, so shifting the text here would cause a first-click visual jump.
@@ -1587,10 +1727,15 @@ impl InputState {
             .get(row.saturating_sub(last_layout.visible_range.start))
         {
             // Check to scroll horizontally and soft wrap lines
-            if let Some(pos) = line.position_for_index(point.column, last_layout, false) {
+            if let Some(pos) = line.position_for_index_with_line_height(
+                point.column,
+                last_layout,
+                line_height,
+                false,
+            ) {
                 let bounds_width = bounds.size.width - last_layout.line_number_width;
                 let col_offset_x = pos.x;
-                row_offset_y += pos.y;
+                row_offset_y += spacing_before + pos.y;
                 if col_offset_x - safety_margin < -scroll_offset.x {
                     // If the position is out of the visible area, scroll to make it visible
                     scroll_offset.x = -col_offset_x + safety_margin;
@@ -1756,7 +1901,6 @@ impl InputState {
             return 0;
         };
 
-        let line_height = last_layout.line_height;
         let line_number_width = last_layout.line_number_width;
 
         // TIP: About the IBeam cursor
@@ -1780,10 +1924,12 @@ impl InputState {
             .zip(last_layout.visible_buffer_lines.iter())
             .enumerate()
         {
+            let line_metrics = last_layout.line_metrics_for_visible_index(vi);
+            let line_height = line_metrics.line_height;
             let line_start_offset = last_layout.visible_line_byte_offsets[vi];
 
             // Calculate line origin for this display row
-            let line_origin = point(px(0.), y_offset);
+            let line_origin = point(px(0.), y_offset + line_metrics.spacing_before);
             let pos = inner_position - line_origin;
 
             // Return offset by use closest_index_for_x if is single line mode.
@@ -1798,7 +1944,11 @@ impl InputState {
             }
 
             // Check if mouse is in this line's bounds
-            if let Some(local_index) = line_layout.closest_index_for_position(pos, last_layout) {
+            if let Some(local_index) = line_layout.closest_index_for_position_with_line_height(
+                pos,
+                last_layout,
+                line_height,
+            ) {
                 let index = line_start_offset + local_index;
                 return if self.masked {
                     self.text.char_index_to_offset(index / MASK_CHAR.len_utf8())
@@ -1815,7 +1965,7 @@ impl InputState {
                 };
             }
 
-            y_offset += line_layout.size(line_height).height;
+            y_offset += line_metrics.row_height(line_layout.wrapped_lines.len());
         }
 
         // Mouse is below all visible lines, return end of text
@@ -2195,6 +2345,7 @@ impl InputState {
     ) {
         let highlighter_rc = pending.highlighter;
         let parse_task_rc = pending.parse_task;
+        let heading_levels_rc = pending.heading_levels;
         let language = pending.language;
         let text = pending.text;
         let is_folding = pending.is_folding;
@@ -2262,6 +2413,7 @@ impl InputState {
             if let Some((new_tree, injection_layers, fold_ranges)) = result {
                 if let Some(h) = highlighter_rc.borrow_mut().as_mut() {
                     h.apply_background_tree(new_tree, &text_for_apply, injection_layers);
+                    *heading_levels_rc.borrow_mut() = h.heading_levels();
                 }
 
                 // Trigger re-render so the new highlights are displayed and
@@ -2491,7 +2643,6 @@ impl EntityInputHandler for InputState {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
-        let line_height = last_layout.line_height;
         let line_number_width = last_layout.line_number_width;
         let range = self.range_from_utf16(&range_utf16);
 
@@ -2501,6 +2652,8 @@ impl EntityInputHandler for InputState {
         let mut y_offset = last_layout.visible_top;
 
         for (vi, line) in last_layout.lines.iter().enumerate() {
+            let line_metrics = last_layout.line_metrics_for_visible_index(vi);
+            let line_height = line_metrics.line_height;
             if start_origin.is_some() && end_origin.is_some() {
                 break;
             }
@@ -2508,26 +2661,28 @@ impl EntityInputHandler for InputState {
             let index_offset = last_layout.visible_line_byte_offsets[vi];
 
             if start_origin.is_none() {
-                if let Some(p) = line.position_for_index(
+                if let Some(p) = line.position_for_index_with_line_height(
                     range.start.saturating_sub(index_offset),
                     last_layout,
+                    line_height,
                     false,
                 ) {
-                    start_origin = Some(p + point(px(0.), y_offset));
+                    start_origin = Some(p + point(px(0.), y_offset + line_metrics.spacing_before));
                 }
             }
 
             if end_origin.is_none() {
-                if let Some(p) = line.position_for_index(
+                if let Some(p) = line.position_for_index_with_line_height(
                     range.end.saturating_sub(index_offset),
                     last_layout,
+                    line_height,
                     false,
                 ) {
-                    end_origin = Some(p + point(px(0.), y_offset));
+                    end_origin = Some(p + point(px(0.), y_offset + line_metrics.spacing_before));
                 }
             }
 
-            y_offset += line.size(line_height).height;
+            y_offset += line_metrics.row_height(line.wrapped_lines.len());
         }
 
         let start_origin = start_origin.unwrap_or_default();
@@ -2538,7 +2693,9 @@ impl EntityInputHandler for InputState {
         Some(Bounds::from_corners(
             bounds.origin + line_number_origin + start_origin,
             // + line_height for show IME panel under the cursor line.
-            bounds.origin + line_number_origin + point(end_origin.x, end_origin.y + line_height),
+            bounds.origin
+                + line_number_origin
+                + point(end_origin.x, end_origin.y + last_layout.line_height),
         ))
     }
 
@@ -2550,12 +2707,22 @@ impl EntityInputHandler for InputState {
     ) -> Option<usize> {
         let last_layout = self.last_layout.as_ref()?;
         let line_point = self.last_bounds?.localize(&point)?;
+        let line_point = line_point - gpui::point(last_layout.line_number_width, px(0.));
+        let mut y_offset = last_layout.visible_top;
 
         for (vi, line) in last_layout.lines.iter().enumerate() {
             let offset = last_layout.visible_line_byte_offsets[vi];
-            if let Some(utf8_index) = line.index_for_position(line_point, last_layout) {
+            let line_metrics = last_layout.line_metrics_for_visible_index(vi);
+            let line_height = line_metrics.line_height;
+            let line_origin = gpui::point(px(0.), y_offset + line_metrics.spacing_before);
+            if let Some(utf8_index) = line.index_for_position_with_line_height(
+                line_point - line_origin,
+                last_layout,
+                line_height,
+            ) {
                 return Some(self.offset_to_utf16(offset + utf8_index));
             }
+            y_offset += line_metrics.row_height(line.wrapped_lines.len());
         }
 
         None

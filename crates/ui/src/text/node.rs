@@ -1,5 +1,5 @@
+use rustc_hash::FxHashMap;
 use std::{
-    collections::HashMap,
     ops::Range,
     sync::{Arc, Mutex},
 };
@@ -346,7 +346,7 @@ pub(crate) struct Paragraph {
     /// The link references in this paragraph, used for reference links.
     ///
     /// The key is the identifier, the value is the url.
-    pub(super) link_refs: HashMap<SharedString, SharedString>,
+    pub(super) link_refs: FxHashMap<SharedString, SharedString>,
 
     pub(crate) state: Arc<Mutex<InlineState>>,
 }
@@ -364,7 +364,7 @@ impl Paragraph {
         Self {
             span: None,
             children: vec![InlineNode::new(&text)],
-            link_refs: HashMap::new(),
+            link_refs: FxHashMap::default(),
             state: Arc::new(Mutex::new(InlineState::default())),
         }
     }
@@ -598,7 +598,7 @@ pub(crate) struct NodeContext {
     /// The byte offset of the node in the original markdown text.
     /// Used for incremental updates.
     pub(crate) offset: usize,
-    pub(crate) link_refs: HashMap<SharedString, LinkMark>,
+    pub(crate) link_refs: FxHashMap<SharedString, LinkMark>,
     pub(crate) style: TextViewStyle,
     pub(crate) code_block_actions: Option<Arc<CodeBlockActionsFn>>,
 }
