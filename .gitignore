@@ -21,3 +21,10 @@ crates/story-web/www/bun.lockb
 .worktrees
 # CocoIndex Code (ccc)
 /.cocoindex_code/
+utils/.gitkeep
+rules/.gitkeep
+rule-tests/.gitkeep
+sgconfig.yml
+.agents/ast_index.md
+.kilo/kilo.jsonc
+localonly/

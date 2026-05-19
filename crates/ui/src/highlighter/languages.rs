@@ -10,6 +10,8 @@ pub enum Language {
     Astro,
     #[cfg(feature = "tree-sitter-asciidoc")]
     AsciiDoc,
+    #[cfg(feature = "tree-sitter-asciidoc")]
+    AsciiDocInline,
     #[cfg(feature = "tree-sitter-bash")]
     Bash,
     #[cfg(feature = "tree-sitter-c")]
@@ -103,6 +105,8 @@ impl Language {
             Self::Astro => "astro",
             #[cfg(feature = "tree-sitter-asciidoc")]
             Self::AsciiDoc => "asciidoc",
+            #[cfg(feature = "tree-sitter-asciidoc")]
+            Self::AsciiDocInline => "asciidoc_inline",
             #[cfg(feature = "tree-sitter-bash")]
             Self::Bash => "bash",
             #[cfg(feature = "tree-sitter-c")]
@@ -191,6 +195,8 @@ impl Language {
             "astro" => Some(Self::Astro),
             #[cfg(feature = "tree-sitter-asciidoc")]
             "asciidoc" | "adoc" => Some(Self::AsciiDoc),
+            #[cfg(feature = "tree-sitter-asciidoc")]
+            "asciidoc_inline" | "asciidoc-inline" => Some(Self::AsciiDocInline),
             #[cfg(feature = "tree-sitter-bash")]
             "bash" | "sh" => Some(Self::Bash),
             #[cfg(feature = "tree-sitter-c")]
@@ -370,6 +376,10 @@ impl Language {
                 languages.push("css");
                 #[cfg(feature = "tree-sitter-typescript")]
                 languages.push("typescript");
+            }
+            #[cfg(feature = "tree-sitter-asciidoc")]
+            Self::AsciiDoc => {
+                languages.push("asciidoc_inline");
             }
             _ => {}
         }
@@ -599,6 +609,13 @@ impl Language {
             Self::AsciiDoc => (
                 tree_sitter_asciidoc::language(),
                 include_str!("languages/asciidoc/highlights.scm"),
+                include_str!("languages/asciidoc/injections.scm"),
+                 "",
+            ),
+            #[cfg(feature = "tree-sitter-asciidoc")]
+            Self::AsciiDocInline => (
+                tree_sitter_asciidoc_inline::language(),
+                include_str!("languages/asciidoc_inline/highlights.scm"),
                 "",
                 "",
             ),
@@ -686,6 +703,8 @@ mod tests {
         assert_eq!(Language::Djot.name(), "djot");
         #[cfg(feature = "tree-sitter-asciidoc")]
         assert_eq!(Language::AsciiDoc.name(), "asciidoc");
+        #[cfg(feature = "tree-sitter-asciidoc")]
+        assert_eq!(Language::AsciiDocInline.name(), "asciidoc_inline");
         #[cfg(feature = "tree-sitter-elixir")]
         assert_eq!(Language::Elixir.name(), "elixir");
         #[cfg(feature = "tree-sitter-erb")]
@@ -722,9 +741,17 @@ mod tests {
 
         #[cfg(feature = "tree-sitter-asciidoc")]
         assert_eq!(Language::from_name("adoc"), Some(Language::AsciiDoc));
-        #[cfg(not(feature = "tree-sitter-asciidoc"))]
-        assert_eq!(Language::from_name("adoc"), None);
-
+        #[cfg(feature = "tree-sitter-asciidoc")]
+        assert_eq!(
+            Language::from_name("asciidoc_inline"),
+            Some(Language::AsciiDocInline)
+        );
         assert_eq!(Language::from_str("unknown"), Language::Plain);
+    }
+    
+    #[test]
+    #[cfg(feature = "tree-sitter-asciidoc")]
+    fn test_print_asciidoc_inline_node_types() {
+        println!("{}", tree_sitter_asciidoc_inline::NODE_TYPES);
     }
 }

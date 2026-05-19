@@ -18,6 +18,7 @@ doctest = false
 decimal = ["dep:rust_decimal"]
 inspector = ["gpui_macros/inspector", "gpui/inspector"]
 
+# enabling asciidoc also enables asciidoc-inline (the two parsers are always used together)
 # For syntax highlighting in Markdown and CodeEditor.
 tree-sitter-languages = [
     "tree-sitter-asciidoc",
@@ -59,7 +60,8 @@ tree-sitter-languages = [
     "tree-sitter-zig",
 ]
 tree-sitter-astro = ["dep:tree-sitter-astro-next"]
-tree-sitter-asciidoc = ["dep:tree-sitter-asciidoc"]
+tree-sitter-asciidoc = ["dep:tree-sitter-asciidoc", "dep:tree-sitter-asciidoc-inline"]
+tree-sitter-asciidoc-inline = ["dep:tree-sitter-asciidoc-inline"]
 tree-sitter-bash = ["dep:tree-sitter-bash"]
 tree-sitter-c = ["dep:tree-sitter-c"]
 tree-sitter-cmake = ["dep:tree-sitter-cmake"]
@@ -163,6 +165,7 @@ tree-sitter-diff = { version = "0.1.0", optional = true }
 tree-sitter-djot = { git = "https://github.com/treeman/tree-sitter-djot", optional = true }
 tree-sitter-elixir = { version = "0.3", optional = true }
 tree-sitter-asciidoc = { version = "0.7.0", optional = true }
+tree-sitter-asciidoc-inline = { version = "0.7.0", optional = true }
 tree-sitter-embedded-template = { version = "0.23.0", optional = true }
 tree-sitter-go = { version = "0.23.4", optional = true }
 tree-sitter-graphql = { version = "0.1.0", optional = true }

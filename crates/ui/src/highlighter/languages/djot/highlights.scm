@@ -5,8 +5,11 @@
 
 (thematic_break) @punctuation.special
 
-(emphasis) @emphasis
-(strong) @emphasis.strong
+((emphasis) @emphasis
+  (#set! highlight.allow-overlap))
+
+((strong) @emphasis.strong
+  (#set! highlight.allow-overlap))
 
 [
   (code_block)
