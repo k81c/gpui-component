@@ -88,9 +88,7 @@ pub struct LanguageConfig {
 // For WASM, we create minimal stubs here
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{
-    sync::{LazyLock, Mutex},
-};
+use std::sync::{LazyLock, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

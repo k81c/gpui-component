@@ -169,12 +169,8 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
             );
         }
         Node::Strong(val) => {
-            text = merge_children_with_mark(
-                paragraph,
-                &val.children,
-                TextMark::default().bold(),
-                cx,
-            );
+            text =
+                merge_children_with_mark(paragraph, &val.children, TextMark::default().bold(), cx);
         }
         Node::Delete(val) => {
             text = merge_children_with_mark(

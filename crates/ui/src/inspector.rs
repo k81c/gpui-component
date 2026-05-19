@@ -1,12 +1,12 @@
-use std::{cell::OnceCell, fmt::Write as _, rc::Rc, sync::OnceLock};
 use rustc_hash::FxHashMap;
+use std::{cell::OnceCell, fmt::Write as _, rc::Rc, sync::OnceLock};
 
 use anyhow::Result;
 use gpui::{
-    actions, div, inspector_reflection::FunctionReflection, prelude::FluentBuilder, px, AnyElement,
-    App, AppContext, Context, DivInspectorState, Entity, Inspector, InspectorElementId,
+    AnyElement, App, AppContext, Context, DivInspectorState, Entity, Inspector, InspectorElementId,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Refineable as _, Render,
-    SharedString, StyleRefinement, Styled, Subscription, Task, Window,
+    SharedString, StyleRefinement, Styled, Subscription, Task, Window, actions, div,
+    inspector_reflection::FunctionReflection, prelude::FluentBuilder, px,
 };
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit, Diagnostic,
@@ -15,6 +15,7 @@ use lsp_types::{
 use ropey::Rope;
 
 use crate::{
+    ActiveTheme, IconName, Selectable, Sizable, TITLE_BAR_HEIGHT,
     alert::Alert,
     button::{Button, ButtonVariants},
     clipboard::Clipboard,
@@ -22,7 +23,7 @@ use crate::{
     h_flex,
     input::{CompletionProvider, Input, InputEvent, InputState, RopeExt, TabSize},
     link::Link,
-    v_flex, ActiveTheme, IconName, Selectable, Sizable, TITLE_BAR_HEIGHT,
+    v_flex,
 };
 
 actions!(inspector, [ToggleInspector]);
@@ -633,7 +634,7 @@ impl CompletionProvider for LspProvider {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{rems, AbsoluteLength, DefiniteLength, Length};
+    use gpui::{AbsoluteLength, DefiniteLength, Length, rems};
     use indoc::indoc;
     use lsp_types::Position;
 

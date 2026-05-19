@@ -1,8 +1,8 @@
-use rustc_hash::FxHashMap;
 use crate::{Theme, ThemeColor, ThemeConfig, ThemeMode, ThemeSet, highlighter::HighlightTheme};
 #[allow(unused)]
 use anyhow::Result;
 use gpui::{App, Global, SharedString};
+use rustc_hash::FxHashMap;
 use std::{
     path::PathBuf,
     rc::Rc,

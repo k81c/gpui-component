@@ -1,5 +1,5 @@
-use rustc_hash::FxHashMap;
 use crate::highlighter::{HighlightTheme, LanguageRegistry};
+use rustc_hash::FxHashMap;
 
 use anyhow::{Context, Result, anyhow};
 use gpui::{HighlightStyle, SharedString};
@@ -607,17 +607,15 @@ impl SyntaxHighlighter {
         }
 
         fn ranges_cache_key(ranges: &[tree_sitter::Range]) -> Vec<(usize, usize)> {
-            ranges
-                .iter()
-                .map(|r| (r.start_byte, r.end_byte))
-                .collect()
+            ranges.iter().map(|r| (r.start_byte, r.end_byte)).collect()
         }
 
         let root_node = tree.root_node();
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&data.query, root_node, TextProvider(text));
 
-        let mut combined_ranges: FxHashMap<SharedString, Vec<tree_sitter::Range>> = FxHashMap::default();
+        let mut combined_ranges: FxHashMap<SharedString, Vec<tree_sitter::Range>> =
+            FxHashMap::default();
         let old_layer_trees: FxHashMap<_, _> = data
             .old_layers
             .iter()
@@ -1101,7 +1099,6 @@ fn collect_query_nodes_inner<'a>(
 
     out.push(node);
 }
-
 
 /// Merge other style (Other on top)
 fn merge_highlight_style(style: &mut HighlightStyle, other: &HighlightStyle) {

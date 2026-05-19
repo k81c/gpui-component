@@ -477,6 +477,16 @@ pub struct InputState {
 
     pub(super) _context_menu_task: Task<Result<()>>,
     pub(super) inline_completion: InlineCompletion,
+
+    pub(super) text_revision: u64,
+    pub(super) heading_levels_revision: u64,
+    pub(super) deferred_update_task: Option<Task<()>>,
+    #[allow(dead_code)]
+    pub(super) cached_line_metrics: Option<(u64, Rc<Vec<LineMetrics>>)>,
+    #[allow(dead_code)]
+    pub(super) cached_layout_map: Option<(u64, LayoutMap)>,
+    #[allow(dead_code)]
+    pub(super) pending_search_update: bool,
 }
 
 impl EventEmitter<InputEvent> for InputState {}
@@ -569,6 +579,12 @@ impl InputState {
             _pending_update: false,
             inline_completion: InlineCompletion::default(),
             cursor_line_end_affinity: false,
+            text_revision: 0,
+            heading_levels_revision: 0,
+            deferred_update_task: None,
+            cached_line_metrics: None,
+            cached_layout_map: None,
+            pending_search_update: false,
         }
     }
 
@@ -2333,6 +2349,74 @@ impl InputState {
         );
     }
 
+    pub(super) fn schedule_deferred_update(&mut self, cx: &mut Context<Self>) {
+        let text_revision = self.text_revision;
+        self.deferred_update_task = Some(cx.spawn(async move |entity, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+
+            let is_current = entity
+                .upgrade()
+                .map(|entity| entity.update(cx, |state, _| state.text_revision == text_revision))
+                .unwrap_or(false);
+            if !is_current {
+                return;
+            }
+
+            let parse_task = entity.upgrade().and_then(|entity| {
+                entity.update(cx, |state, _| match &state.mode {
+                    InputMode::MarkedEditor { parse_task, .. } => Some(parse_task.clone()),
+                    _ => None,
+                })
+            });
+
+            if let Some(parse_task_rc) = parse_task {
+                let mut maybe_task = None;
+                if let Some(entity) = entity.upgrade() {
+                    _ = entity.update(cx, |state, _| {
+                        if state.text_revision == text_revision {
+                            if let Some(task) = parse_task_rc.borrow_mut().take() {
+                                maybe_task = Some(task);
+                            }
+                        }
+                    });
+                }
+                if let Some(task) = maybe_task {
+                    task.await;
+                }
+            }
+
+            if let Some(entity) = entity.upgrade() {
+                _ = entity.update(cx, |state, cx| {
+                    if state.text_revision == text_revision {
+                        state.update_derived_states(cx);
+                    }
+                });
+            }
+        }));
+    }
+
+    fn update_derived_states(&mut self, cx: &mut Context<Self>) {
+        if let InputMode::MarkedEditor {
+            highlighter,
+            heading_levels,
+            ..
+        } = &self.mode
+        {
+            let mut heading_levels_updated = false;
+            if let Some(h) = highlighter.borrow().as_ref() {
+                let new_heading_levels = h.heading_levels();
+                *heading_levels.borrow_mut() = new_heading_levels;
+                heading_levels_updated = true;
+            }
+            if heading_levels_updated {
+                self.heading_levels_revision += 1;
+            }
+        }
+        cx.notify();
+    }
+
     /// Spawn a background parse after the synchronous parse timed out.
     ///
     /// Dropping the returned `Task` (stored in `parse_task`) cancels the
@@ -2345,7 +2429,6 @@ impl InputState {
     ) {
         let highlighter_rc = pending.highlighter;
         let parse_task_rc = pending.parse_task;
-        let heading_levels_rc = pending.heading_levels;
         let language = pending.language;
         let text = pending.text;
         let is_folding = pending.is_folding;
@@ -2413,7 +2496,6 @@ impl InputState {
             if let Some((new_tree, injection_layers, fold_ranges)) = result {
                 if let Some(h) = highlighter_rc.borrow_mut().as_mut() {
                     h.apply_background_tree(new_tree, &text_for_apply, injection_layers);
-                    *heading_levels_rc.borrow_mut() = h.heading_levels();
                 }
 
                 // Trigger re-render so the new highlights are displayed and
@@ -2548,6 +2630,8 @@ impl EntityInputHandler for InputState {
 
         self.update_fold_candidates_incremental(&range, new_text);
         self.lsp.update(&self.text, window, cx);
+        self.text_revision += 1;
+        self.schedule_deferred_update(cx);
         self.selected_range = (new_offset..new_offset).into();
         self.ime_marked_range.take();
         self.update_preferred_column();
@@ -2615,6 +2699,8 @@ impl EntityInputHandler for InputState {
 
         self.update_fold_candidates_incremental(&range, new_text);
         self.lsp.update(&self.text, window, cx);
+        self.text_revision += 1;
+        self.schedule_deferred_update(cx);
         if new_text.is_empty() {
             // Cancel selection, when cancel IME input.
             self.selected_range = (range.start..range.start).into();
@@ -2743,6 +2829,10 @@ impl Render for InputState {
                 .update_highlighter(&(0..0), &self.text, &self.text, "", false, cx);
             if let Some(bg) = bg {
                 Self::dispatch_background_parse(bg, window, cx);
+                self.text_revision += 1;
+                self.schedule_deferred_update(cx);
+            } else {
+                self.update_derived_states(cx);
             }
 
             self.update_fold_candidates();

@@ -797,7 +797,7 @@ impl TextElement {
             layout_map.total_height,
             input_height,
         );
-        let mut line_bottom = px(0.);
+
         for (ix, _line) in state.display_map.lines().iter().enumerate() {
             let visible_wrap_rows = state.display_map.visible_wrap_row_count_for_buffer_line(ix);
 

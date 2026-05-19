@@ -4,8 +4,8 @@ use gpui::{
     FocusHandle, Focusable, Global, Hsla, IntoElement, Render, SharedString, WeakEntity, Window,
 };
 use rust_i18n::t;
-use std::sync::Arc;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 use super::{DockArea, PanelInfo, PanelState, invalid_panel::InvalidPanel};
 

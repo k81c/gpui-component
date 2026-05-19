@@ -610,7 +610,7 @@ impl Language {
                 tree_sitter_asciidoc::language(),
                 include_str!("languages/asciidoc/highlights.scm"),
                 include_str!("languages/asciidoc/injections.scm"),
-                 "",
+                "",
             ),
             #[cfg(feature = "tree-sitter-asciidoc")]
             Self::AsciiDocInline => (
@@ -748,7 +748,7 @@ mod tests {
         );
         assert_eq!(Language::from_str("unknown"), Language::Plain);
     }
-    
+
     #[test]
     #[cfg(feature = "tree-sitter-asciidoc")]
     fn test_print_asciidoc_inline_node_types() {

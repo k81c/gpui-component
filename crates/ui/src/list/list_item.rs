@@ -5,8 +5,8 @@ use gpui::{
     StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
     prelude::FluentBuilder as _,
 };
-use smallvec::SmallVec;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ListItemMode {

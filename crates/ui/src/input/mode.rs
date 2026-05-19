@@ -14,7 +14,6 @@ use crate::input::{InputEdit, RopeExt as _, TabSize};
 pub(super) struct PendingBackgroundParse {
     pub highlighter: Rc<RefCell<Option<SyntaxHighlighter>>>,
     pub parse_task: Rc<RefCell<Option<Task<()>>>>,
-    pub heading_levels: Rc<RefCell<Vec<Option<u8>>>>,
     pub language: SharedString,
     pub text: Rope,
     pub is_folding: bool,
@@ -321,7 +320,6 @@ impl InputMode {
                         text: new_text.clone(),
                         highlighter: highlighter.clone(),
                         parse_task: parse_task.clone(),
-                        heading_levels: Rc::new(RefCell::new(Vec::new())),
                         is_folding: *folding,
                     };
                     drop(highlighter_ref);
@@ -332,7 +330,6 @@ impl InputMode {
                 language,
                 highlighter,
                 parse_task,
-                heading_levels,
                 folding,
                 ..
             } => {
@@ -353,7 +350,6 @@ impl InputMode {
                 let edit = replacement_input_edit(old_text, new_text, selected_range, change_text);
                 const SYNC_PARSE_TIMEOUT: Duration = Duration::from_millis(2);
                 let completed = h.update(Some(edit), new_text, Some(SYNC_PARSE_TIMEOUT));
-                *heading_levels.borrow_mut() = h.heading_levels();
 
                 if completed {
                     parse_task.borrow_mut().take();
@@ -364,7 +360,6 @@ impl InputMode {
                         text: new_text.clone(),
                         highlighter: highlighter.clone(),
                         parse_task: parse_task.clone(),
-                        heading_levels: heading_levels.clone(),
                         is_folding: *folding,
                     };
                     drop(highlighter_ref);

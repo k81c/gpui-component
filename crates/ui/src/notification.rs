@@ -1,10 +1,5 @@
 use rustc_hash::FxHashMap;
-use std::{
-    any::TypeId,
-    collections::VecDeque,
-    rc::Rc,
-    time::Duration,
-};
+use std::{any::TypeId, collections::VecDeque, rc::Rc, time::Duration};
 
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, AppContext, ClickEvent, Context,

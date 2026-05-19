@@ -1,5 +1,5 @@
-use std::fmt::Display;
 use rustc_hash::FxHashMap;
+use std::fmt::Display;
 
 use gpui::{Hsla, SharedString, hsla};
 use serde::{Deserialize, Deserializer, de::Error as _};

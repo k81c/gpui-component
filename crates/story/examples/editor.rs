@@ -66,8 +66,7 @@ fn init() {
     );
 }
 
-pub struct 
-Example {
+pub struct Example {
     editor: Entity<InputState>,
     tree_state: Entity<TreeState>,
     go_to_line_state: Entity<InputState>,

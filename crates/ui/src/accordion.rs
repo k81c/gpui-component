@@ -1,5 +1,5 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc};
 use rustc_hash::FxHashSet;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement, RenderOnce,

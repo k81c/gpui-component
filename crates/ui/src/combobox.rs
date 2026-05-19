@@ -790,7 +790,9 @@ where
         mut self,
         builder: impl Fn(&mut Window, &App) -> E + 'static,
     ) -> Self {
-        self.empty = Some(Box::new(move |window, cx| builder(window, cx).into_any_element()));
+        self.empty = Some(Box::new(move |window, cx| {
+            builder(window, cx).into_any_element()
+        }));
         self
     }
 
@@ -925,13 +927,7 @@ fn render_trigger_container(
                 .rounded(cx.theme().radius)
                 .when(cx.theme().shadow, |this| this.shadow_xs())
         })
-        .map(|this| {
-            if disabled {
-                this.shadow_none()
-            } else {
-                this
-            }
-        })
+        .map(|this| if disabled { this.shadow_none() } else { this })
         .overflow_hidden()
         .input_size(size)
         .input_text_size(size)
@@ -1113,8 +1109,7 @@ mod tests {
         let cx = cx.add_empty_window();
         cx.update(|window, cx| {
             let items = SearchableVec::new(vec!["React", "Vue", "Angular"]);
-            let state = cx
-                .new(|cx| ComboboxState::new(items, vec![], window, cx).multiple(true));
+            let state = cx.new(|cx| ComboboxState::new(items, vec![], window, cx).multiple(true));
 
             state.update(cx, |s, cx| s.add_selected_index(IndexPath::new(0), cx));
             assert_eq!(state.read(cx).selected_values(), &["React"]);
@@ -1221,9 +1216,8 @@ mod tests {
 
     // Suppress unused import warning for SearchableListState in test module.
     #[allow(unused)]
-    fn _uses_state<D: SearchableListDelegate + 'static>(
-        _: &SearchableListState<D>,
-    ) where
+    fn _uses_state<D: SearchableListDelegate + 'static>(_: &SearchableListState<D>)
+    where
         <D::Item as SearchableListItem>::Value: PartialEq + Clone,
     {
     }
