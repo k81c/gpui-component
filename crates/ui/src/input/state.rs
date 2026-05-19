@@ -382,6 +382,17 @@ impl LastLayout {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PrepaintCacheKey {
+    pub(super) text_revision: u64,
+    pub(super) heading_levels_revision: u64,
+    pub(super) wrap_width: Option<Pixels>,
+    pub(super) buffer_line_count: usize,
+    pub(super) font_size: Pixels,
+    pub(super) line_height: Pixels,
+    pub(super) folded_ranges: Vec<super::FoldRange>,
+}
+
 /// InputState to keep editing state of the [`super::Input`].
 pub struct InputState {
     pub(super) focus_handle: FocusHandle,
@@ -481,10 +492,8 @@ pub struct InputState {
     pub(super) text_revision: u64,
     pub(super) heading_levels_revision: u64,
     pub(super) deferred_update_task: Option<Task<()>>,
-    #[allow(dead_code)]
-    pub(super) cached_line_metrics: Option<(u64, Rc<Vec<LineMetrics>>)>,
-    #[allow(dead_code)]
-    pub(super) cached_layout_map: Option<(u64, LayoutMap)>,
+    pub(super) cached_line_metrics: Option<(PrepaintCacheKey, Rc<Vec<LineMetrics>>)>,
+    pub(super) cached_layout_map: Option<(PrepaintCacheKey, LayoutMap)>,
     #[allow(dead_code)]
     pub(super) pending_search_update: bool,
 }

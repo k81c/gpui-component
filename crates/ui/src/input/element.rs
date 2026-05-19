@@ -22,8 +22,8 @@ use crate::{
 };
 
 use super::{
-    InputState, LastLayout, LayoutMap, LineMetrics, MarkedLineKind, WhitespaceIndicators,
-    mode::InputMode,
+    InputState, LastLayout, LayoutMap, LineMetrics, MarkedLineKind, PrepaintCacheKey,
+    WhitespaceIndicators, mode::InputMode,
 };
 
 const BOTTOM_MARGIN_ROWS: usize = 3;
@@ -783,14 +783,13 @@ impl TextElement {
             return (0..1, vec![0], visible_top);
         }
 
-        let total_lines = state.display_map.wrap_row_count();
+        let buffer_line_count = state.display_map.buffer_line_count();
         let mut scroll_top = if let Some(deferred_scroll_offset) = state.deferred_scroll_offset {
             deferred_scroll_offset.y
         } else {
             state.scroll_handle.offset().y
         };
 
-        let mut visible_range = 0..total_lines;
         scroll_top = clamp_auto_grow_vertical_scroll_offset(
             &state.mode,
             scroll_top,
@@ -798,7 +797,29 @@ impl TextElement {
             input_height,
         );
 
-        for (ix, _line) in state.display_map.lines().iter().enumerate() {
+        let mut visible_range = 0..buffer_line_count;
+
+        // Binary search to find the first line that is not completely above the viewport.
+        let start_ix = layout_map
+            .origins
+            .partition_point(|&origin| origin < -scroll_top)
+            .saturating_sub(1);
+
+        // Find the last non-hidden line before start_ix to correctly initialize visible_range.start and visible_top
+        let mut last_above_non_hidden = None;
+        for ix in (0..start_ix).rev() {
+            if state.display_map.visible_wrap_row_count_for_buffer_line(ix) > 0 {
+                last_above_non_hidden = Some(ix);
+                break;
+            }
+        }
+
+        if let Some(prev_ix) = last_above_non_hidden {
+            visible_top = layout_map.origin_for_line(prev_ix);
+            visible_range.start = prev_ix;
+        }
+
+        for ix in start_ix..buffer_line_count {
             let visible_wrap_rows = state.display_map.visible_wrap_row_count_for_buffer_line(ix);
 
             if visible_wrap_rows == 0 {
@@ -814,7 +835,7 @@ impl TextElement {
             }
 
             if line_bottom + scroll_top >= input_height {
-                visible_range.end = (ix + extra_rows).min(total_lines);
+                visible_range.end = (ix + extra_rows).min(buffer_line_count);
                 break;
             }
         }
@@ -1584,16 +1605,57 @@ impl Element for TextElement {
         let style = window.text_style();
         let font = style.font();
         let text_size = style.font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
+
+        let mut cached_metrics_and_layout = None;
 
         self.state.update(cx, |state, cx| {
             state.display_map.set_font(font, text_size, cx);
             state.display_map.ensure_text_prepared(&state.text, cx);
+
+            let (line_number_width, _) =
+                Self::layout_line_numbers(state, &state.text, text_size, &style, window);
+            let multi_line = state.mode.is_multi_line();
+            let wrap_width = if multi_line && state.soft_wrap {
+                Some(bounds.size.width - line_number_width - RIGHT_MARGIN)
+            } else {
+                None
+            };
+
+            let key = PrepaintCacheKey {
+                text_revision: state.text_revision,
+                heading_levels_revision: state.heading_levels_revision,
+                wrap_width,
+                buffer_line_count: state.display_map.buffer_line_count(),
+                font_size: text_size,
+                line_height,
+                folded_ranges: state.display_map.folded_ranges().to_vec(),
+            };
+
+            let cache_hit = if let (Some((m_key, _)), Some((l_key, _))) = (
+                &state.cached_line_metrics,
+                &state.cached_layout_map,
+            ) {
+                m_key == &key && l_key == &key
+            } else {
+                false
+            };
+
+            if !cache_hit {
+                let all_line_metrics = Self::line_metrics_for_state(state, text_size, line_height);
+                let layout_map = Self::layout_map_for_state(state, &all_line_metrics);
+                state.cached_line_metrics = Some((key.clone(), Rc::new(all_line_metrics)));
+                state.cached_layout_map = Some((key, layout_map));
+            }
+
+            cached_metrics_and_layout = Some((
+                state.cached_line_metrics.as_ref().unwrap().1.clone(),
+                state.cached_layout_map.as_ref().unwrap().1.clone(),
+            ));
         });
 
+        let (all_line_metrics, layout_map) = cached_metrics_and_layout.unwrap();
         let state = self.state.read(cx);
-        let line_height = window.line_height();
-        let all_line_metrics = Self::line_metrics_for_state(&state, text_size, line_height);
-        let layout_map = Self::layout_map_for_state(&state, &all_line_metrics);
 
         let (visible_range, visible_buffer_lines, visible_top) =
             self.calculate_visible_range(&state, &layout_map, bounds.size.height);
