@@ -1632,10 +1632,9 @@ impl Element for TextElement {
                 folded_ranges: state.display_map.folded_ranges().to_vec(),
             };
 
-            let cache_hit = if let (Some((m_key, _)), Some((l_key, _))) = (
-                &state.cached_line_metrics,
-                &state.cached_layout_map,
-            ) {
+            let cache_hit = if let (Some((m_key, _)), Some((l_key, _))) =
+                (&state.cached_line_metrics, &state.cached_layout_map)
+            {
                 m_key == &key && l_key == &key
             } else {
                 false

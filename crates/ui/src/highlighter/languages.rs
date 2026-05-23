@@ -754,4 +754,10 @@ mod tests {
     fn test_print_asciidoc_inline_node_types() {
         println!("{}", tree_sitter_asciidoc_inline::NODE_TYPES);
     }
+
+    #[test]
+    #[cfg(feature = "tree-sitter-asciidoc")]
+    fn test_print_asciidoc_block_node_types() {
+        println!("{}", tree_sitter_asciidoc::NODE_TYPES);
+    }
 }

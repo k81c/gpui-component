@@ -2358,6 +2358,68 @@ impl InputState {
         );
     }
 
+    fn project_marked_heading_levels_for_edit(
+        &mut self,
+        old_text: &Rope,
+        range: &Range<usize>,
+        new_text: &str,
+    ) {
+        let heading_levels = match self.mode.marked_heading_levels() {
+            Some(hl) => hl.clone(),
+            None => return,
+        };
+
+        let old_start_row = old_text
+            .offset_to_point(range.start.min(old_text.len()))
+            .row;
+        let old_end_row = if range.is_empty() {
+            old_start_row
+        } else {
+            old_text
+                .offset_to_point((range.end - 1).min(old_text.len()))
+                .row
+        };
+
+        let new_start_row = self
+            .text
+            .offset_to_point(range.start.min(self.text.len()))
+            .row;
+        let new_end_row = if new_text.is_empty() {
+            new_start_row
+        } else {
+            let new_end_offset = range.start + new_text.len();
+            self.text
+                .offset_to_point((new_end_offset - 1).min(self.text.len()))
+                .row
+        };
+
+        let old_start = old_start_row;
+        let old_end = if range.is_empty() {
+            old_start_row
+        } else {
+            old_end_row + 1
+        };
+
+        let new_rows_len = if new_text.is_empty() {
+            0
+        } else {
+            new_end_row.saturating_sub(new_start_row) + 1
+        };
+
+        let mut levels = heading_levels.borrow_mut();
+        let levels_len = levels.len();
+        let old_start = old_start.min(levels_len);
+        let old_end = old_end.min(levels_len).max(old_start);
+
+        levels.splice(
+            old_start..old_end,
+            std::iter::repeat(None).take(new_rows_len),
+        );
+
+        let target_len = self.display_map.buffer_line_count();
+        levels.resize(target_len, None);
+    }
+
     pub(super) fn schedule_deferred_update(&mut self, cx: &mut Context<Self>) {
         let text_revision = self.text_revision;
         self.deferred_update_task = Some(cx.spawn(async move |entity, cx| {
@@ -2629,6 +2691,7 @@ impl EntityInputHandler for InputState {
             .adjust_folds_for_edit(&old_text, &range, new_text);
         self.display_map
             .on_text_changed(&self.text, &range, &Rope::from(new_text), cx);
+        self.project_marked_heading_levels_for_edit(&old_text, &range, new_text);
 
         let bg = self
             .mode
@@ -2698,6 +2761,7 @@ impl EntityInputHandler for InputState {
             .adjust_folds_for_edit(&old_text, &range, new_text);
         self.display_map
             .on_text_changed(&self.text, &range, &Rope::from(new_text), cx);
+        self.project_marked_heading_levels_for_edit(&old_text, &range, new_text);
 
         let bg = self
             .mode
@@ -3015,5 +3079,90 @@ ORDER BY id
              Before: {:?}\nAfter: {:?}",
             colored_before, colored_after
         );
+    }
+
+    #[gpui::test]
+    fn test_heading_levels_shift_on_edit(cx: &mut TestAppContext) {
+        let mut input: Option<Entity<InputState>> = None;
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.set_global(Theme::default());
+                super::super::init(cx);
+                input = Some(cx.new(|cx| InputState::new(window, cx).marked_editor("markdown")));
+                cx.new(|cx| crate::Root::new(input.clone().unwrap(), window, cx))
+            })
+            .unwrap()
+        });
+
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let input = input.unwrap();
+
+        let text = "\
+# Header 1
+## Header 2
+### Header 3";
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value(text, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        // Let's force update derived states to populate initially
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.update_derived_states(cx);
+            });
+        });
+
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let levels = state.mode.marked_heading_levels().unwrap().borrow().clone();
+                assert_eq!(levels.len(), 3);
+                assert_eq!(levels[0], Some(1));
+                assert_eq!(levels[1], Some(2));
+                assert_eq!(levels[2], Some(3));
+            });
+        });
+
+        // Now, let's insert a new line at line 1 (inserting at byte offset 11 which is the start of Line 1)
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                let offset = state.text.line_start_offset(1);
+                state.replace_text_in_range(Some(offset..offset), "\n", window, cx);
+            });
+        });
+
+        // Immediately (before the 300ms deferred update runs), heading_levels should have shifted optimistically.
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let levels = state.mode.marked_heading_levels().unwrap().borrow().clone();
+                assert_eq!(levels.len(), 4);
+                // Line 0 is still H1
+                assert_eq!(levels[0], Some(1));
+                // Line 1 is the newly inserted line, which is None
+                assert_eq!(levels[1], None);
+                // Line 2 has shifted down from Line 1 (H2)
+                assert_eq!(levels[2], Some(2));
+                // Line 3 has shifted down from Line 2 (H3)
+                assert_eq!(levels[3], Some(3));
+            });
+        });
+
+        // Run until parked to allow the deferred updates to settle
+        cx.run_until_parked();
+
+        // After deferred update, the parser runs and updates it to the correct values
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let levels = state.mode.marked_heading_levels().unwrap().borrow().clone();
+                assert_eq!(levels.len(), 4);
+                assert_eq!(levels[0], Some(1));
+                assert_eq!(levels[1], None);
+                assert_eq!(levels[2], Some(2));
+                assert_eq!(levels[3], Some(3));
+            });
+        });
     }
 }

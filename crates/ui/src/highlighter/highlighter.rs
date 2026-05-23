@@ -1139,7 +1139,7 @@ mod tests {
         style
     }
 
-    #[cfg(feature = "tree-sitter-languages")]
+    #[cfg(any(feature = "tree-sitter-languages", feature = "tree-sitter-asciidoc"))]
     fn has_highlight_covering(
         highlights: &[HighlightItem],
         source: &str,
@@ -1496,5 +1496,46 @@ $x = 1;
         assert_eq!(dj.language().as_ref(), "djot");
         assert!(dj.update(None, &djot, None));
         assert_eq!(dj.heading_levels(), vec![Some(1), None, Some(2), None]);
+    }
+
+    #[test]
+    #[cfg(feature = "tree-sitter-asciidoc")]
+    fn test_asciidoc_heading_styles_all_levels() {
+        // 複数 section が入れ子になる構造で全 heading が @title キャプチャされるか確認
+        let source = "= Doc Title\n\n== Section One\n\nText here.\n\n=== SubSection\n\nMore text.\n\n== Section Two\n\nAnother paragraph.\n";
+        let rope = Rope::from_str(source);
+        let mut highlighter = SyntaxHighlighter::new("asciidoc");
+        highlighter.update(None, &rope, None);
+
+        let highlights = highlighter.match_styles(0..source.len());
+
+        for heading_text in ["Doc Title", "Section One", "SubSection", "Section Two"] {
+            assert!(
+                has_highlight_covering(&highlights, source, heading_text, "title"),
+                "heading {:?} should have @title highlight",
+                heading_text
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "tree-sitter-asciidoc")]
+    fn test_asciidoc_inline_emphasis_styles() {
+        // bold と italic が injection 経由で正しくキャプチャされるか確認
+        let source = "= Title\n\nThis has *bold text* and _italic text_ here.\n";
+        let rope = Rope::from_str(source);
+        let mut highlighter = SyntaxHighlighter::new("asciidoc");
+        highlighter.update(None, &rope, None);
+
+        let highlights = highlighter.match_styles(0..source.len());
+
+        assert!(
+            has_highlight_covering(&highlights, source, "bold text", "emphasis.strong"),
+            "*bold text* should have @emphasis.strong highlight"
+        );
+        assert!(
+            has_highlight_covering(&highlights, source, "italic text", "emphasis"),
+            "_italic text_ should have @emphasis highlight"
+        );
     }
 }
