@@ -68,6 +68,9 @@ pub(crate) struct InjectionParseData {
     pub(crate) language_capture_index: Option<u32>,
     /// Old injection trees that can be reused when the injected ranges are unchanged.
     pub(crate) old_layers: Vec<ReusableInjectionLayer>,
+    /// The edit that produced the current text, used to incrementally update
+    /// old injection trees before comparing their included ranges.
+    pub(crate) edit: InputEdit,
 }
 
 pub(crate) struct ReusableInjectionLayer {
@@ -273,13 +276,24 @@ impl SyntaxHighlighter {
         let combined_injections_query = if !config.injections.is_empty() {
             if let Ok(mut ciq) = Query::new(&config.language, &config.injections) {
                 let mut has_combined_query = false;
+                // Scan the injection query's own patterns for injection.combined.
+                // (Previously this scanned the highlights query, which never contains
+                // injection.combined for languages like asciidoc that keep highlights
+                // and injections in separate .scm files.)
+                for pattern_index in 0..ciq.pattern_count() {
+                    let settings = ciq.property_settings(pattern_index);
+                    if settings.iter().any(|s| &*s.key == "injection.combined") {
+                        has_combined_query = true;
+                    } else {
+                        ciq.disable_pattern(pattern_index);
+                    }
+                }
+                // Also disable injection patterns from the main highlights query
+                // to avoid duplicate processing.
                 for pattern_index in 0..locals_pattern_index {
                     let settings = query.property_settings(pattern_index);
                     if settings.iter().any(|s| &*s.key == "injection.combined") {
-                        has_combined_query = true;
                         query.disable_pattern(pattern_index);
-                    } else {
-                        ciq.disable_pattern(pattern_index);
                     }
                 }
                 if has_combined_query {
@@ -502,6 +516,12 @@ impl SyntaxHighlighter {
     /// still works with stale data, but `self.text` is updated so that the
     /// caller can send the current text to a background parse.
     /// When `timeout` is `None`, parsing runs to completion and always returns `true`.
+    /// Returns true if this language has injection queries
+    /// (i.e. it embeds other languages such as asciidoc_inline in asciidoc).
+    pub fn has_injections(&self) -> bool {
+        self.injections_query.is_some()
+    }
+
     pub fn update(
         &mut self,
         edit: Option<InputEdit>,
@@ -566,13 +586,28 @@ impl SyntaxHighlighter {
         let new_tree = new_tree.unwrap();
         self.tree = Some(new_tree.clone());
         self.text = text.clone();
-        self.parse_injection_layers(&new_tree);
-        true
+
+        if self.has_injections() {
+            // Injection parsing is deferred to a background thread to avoid
+            // blocking the main thread on every keystroke.
+            // Apply the edit to each existing injection tree so that byte
+            // offsets remain approximately correct until the background parse
+            // completes; this minimises visual artefacts.
+            for layer in &mut self.injection_layers {
+                layer.tree.edit(&edit);
+                layer.byte_range = Self::shift_byte_range(&layer.byte_range, &edit);
+            }
+            // Signal the caller to dispatch a background parse.
+            false
+        } else {
+            self.parse_injection_layers(&new_tree);
+            true
+        }
     }
 
     /// Returns the data needed to compute injection layers on a background thread.
     /// Returns `None` if this language has no injections.
-    pub(crate) fn injection_parse_data(&self) -> Option<InjectionParseData> {
+    pub(crate) fn injection_parse_data(&self, edit: InputEdit) -> Option<InjectionParseData> {
         let query = self.injections_query.clone()?;
         Some(InjectionParseData {
             query,
@@ -587,6 +622,7 @@ impl SyntaxHighlighter {
                     tree: layer.tree.clone(),
                 })
                 .collect(),
+            edit,
         })
     }
 
@@ -692,10 +728,36 @@ impl SyntaxHighlighter {
                 continue;
             }
             sort_ranges(&mut ranges);
-            let old_tree = old_layer_trees
-                .get(&(language_name.clone(), ranges_cache_key(&ranges)))
-                .copied();
-            if let Some(layer) = Self::parse_injection_layer(&language_name, ranges, old_tree, text)
+
+            // Try to reuse the old injection tree via incremental parsing.
+            // Apply the edit to the old tree so that `included_ranges()` returns
+            // shifted byte offsets; if those match the newly-queried ranges the
+            // structure of the injection is unchanged and we can do a diff-parse.
+            // If they differ (structural change or multi-edit race) fall back to
+            // a full re-parse by passing `old_tree = None`, which is always safe.
+            let old_tree: Option<Tree> = data
+                .old_layers
+                .iter()
+                .find(|layer| layer.language_name == language_name)
+                .and_then(|old_layer| {
+                    let mut edited_tree = old_layer.tree.clone();
+                    edited_tree.edit(&data.edit);
+                    let shifted: Vec<(usize, usize)> = edited_tree
+                        .included_ranges()
+                        .iter()
+                        .map(|r| (r.start_byte, r.end_byte))
+                        .collect();
+                    let queried: Vec<(usize, usize)> =
+                        ranges.iter().map(|r| (r.start_byte, r.end_byte)).collect();
+                    if shifted == queried {
+                        Some(edited_tree)
+                    } else {
+                        None // structural change or multi-edit: full re-parse
+                    }
+                });
+
+            if let Some(layer) =
+                Self::parse_injection_layer(&language_name, ranges, old_tree.as_ref(), text)
             {
                 new_layers.push(layer);
             }
@@ -748,25 +810,58 @@ impl SyntaxHighlighter {
     ///
     /// `injection_layers` must also be pre-computed in the background via
     /// [`compute_injection_layers`] to avoid blocking the main thread.
+    ///
+    /// Returns `true` if the tree was applied, `false` if the text no longer
+    /// matches (i.e. the user typed during the background parse).
     pub(crate) fn apply_background_tree(
         &mut self,
         tree: Tree,
         text: &Rope,
         injection_layers: Vec<InjectionLayer>,
-    ) {
+    ) -> bool {
         // Only apply if the text still matches what was parsed.
         if !self.text.eq(text) {
-            return;
+            return false;
         }
 
         self.tree = Some(tree);
         self.injection_layers = injection_layers;
+        true
+    }
+
+    /// Shift a byte range by a tree-sitter edit.
+    /// Positions before the edit start are unchanged; positions inside the
+    /// replaced region are clamped to the new end; positions after are shifted
+    /// by the net byte delta.
+    fn shift_byte_range(range: &Range<usize>, edit: &InputEdit) -> Range<usize> {
+        let delta: isize = edit.new_end_byte as isize - edit.old_end_byte as isize;
+        let shift = |pos: usize| -> usize {
+            if pos <= edit.start_byte {
+                pos
+            } else if pos <= edit.old_end_byte {
+                edit.new_end_byte
+            } else {
+                (pos as isize + delta).max(0) as usize
+            }
+        };
+        shift(range.start)..shift(range.end)
     }
 
     /// Parse injection layers after the main tree is updated.
     /// pattern: parse once in update, query many times in render.
     fn parse_injection_layers(&mut self, tree: &Tree) {
-        let Some(data) = self.injection_parse_data() else {
+        // Internal call: no real edit available, so use a no-op edit.
+        // This path is only taken for languages without injections or
+        // on initial load (before any user edits).
+        let no_op_edit = InputEdit {
+            start_byte: 0,
+            old_end_byte: 0,
+            new_end_byte: 0,
+            start_position: tree_sitter::Point::new(0, 0),
+            old_end_position: tree_sitter::Point::new(0, 0),
+            new_end_position: tree_sitter::Point::new(0, 0),
+        };
+        let Some(data) = self.injection_parse_data(no_op_edit) else {
             self.injection_layers.clear();
             return;
         };
@@ -1526,6 +1621,27 @@ $x = 1;
         let rope = Rope::from_str(source);
         let mut highlighter = SyntaxHighlighter::new("asciidoc");
         highlighter.update(None, &rope, None);
+
+        // update() は has_injections のため false を返し injection_layers を同期更新しない。
+        // background parse をシミュレートして injection_layers を手動適用する。
+        {
+            use tree_sitter::{InputEdit, Point};
+            let tree = highlighter.tree().cloned().expect("main tree should be present");
+            // 初回ロードは no-op edit (0→len)
+            let fake_edit = InputEdit {
+                start_byte: 0,
+                old_end_byte: 0,
+                new_end_byte: rope.len(),
+                start_position: Point::new(0, 0),
+                old_end_position: Point::new(0, 0),
+                new_end_position: Point::new(0, rope.len()),
+            };
+            if let Some(data) = highlighter.injection_parse_data(fake_edit) {
+                let layers =
+                    SyntaxHighlighter::compute_injection_layers(data, &tree, &rope);
+                highlighter.apply_background_tree(tree, &rope, layers);
+            }
+        }
 
         let highlights = highlighter.match_styles(0..source.len());
 

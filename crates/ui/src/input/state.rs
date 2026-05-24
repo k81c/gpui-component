@@ -2503,6 +2503,8 @@ impl InputState {
         let language = pending.language;
         let text = pending.text;
         let is_folding = pending.is_folding;
+        let pre_parsed_tree = pending.pre_parsed_tree;
+        let input_edit = pending.input_edit;
 
         let old_tree = highlighter_rc
             .borrow()
@@ -2514,7 +2516,7 @@ impl InputState {
         let injection_data = highlighter_rc
             .borrow()
             .as_ref()
-            .and_then(|h| h.injection_parse_data());
+            .and_then(|h| h.injection_parse_data(input_edit));
 
         let text_for_apply = text.clone();
         let task = cx.spawn_in(window, async move |entity, cx| {
@@ -2525,23 +2527,28 @@ impl InputState {
                         return None;
                     };
 
-                    let mut parser = tree_sitter::Parser::new();
-                    if parser.set_language(&config.language).is_err() {
-                        return None;
-                    }
-
-                    let new_tree = parser.parse_with_options(
-                        &mut |offset, _| {
-                            if offset >= text.len() {
-                                ""
-                            } else {
-                                let (chunk, chunk_byte_ix) = text.chunk(offset);
-                                &chunk[offset - chunk_byte_ix..]
-                            }
-                        },
-                        old_tree.as_ref(),
-                        None,
-                    )?;
+                    // If the main tree was already parsed synchronously (injection-only
+                    // background dispatch), reuse it directly to skip redundant re-parsing.
+                    let new_tree = if let Some(tree) = pre_parsed_tree {
+                        tree
+                    } else {
+                        let mut parser = tree_sitter::Parser::new();
+                        if parser.set_language(&config.language).is_err() {
+                            return None;
+                        }
+                        parser.parse_with_options(
+                            &mut |offset, _| {
+                                if offset >= text.len() {
+                                    ""
+                                } else {
+                                    let (chunk, chunk_byte_ix) = text.chunk(offset);
+                                    &chunk[offset - chunk_byte_ix..]
+                                }
+                            },
+                            old_tree.as_ref(),
+                            None,
+                        )?
+                    };
 
                     // Compute injection layers in the background to avoid blocking the
                     // main thread with combined-injection parsing (e.g. PHP, HTML+JS/CSS).
@@ -2565,13 +2572,20 @@ impl InputState {
                 .await;
 
             if let Some((new_tree, injection_layers, fold_ranges)) = result {
-                if let Some(h) = highlighter_rc.borrow_mut().as_mut() {
-                    h.apply_background_tree(new_tree, &text_for_apply, injection_layers);
-                }
+                let applied = if let Some(h) = highlighter_rc.borrow_mut().as_mut() {
+                    h.apply_background_tree(new_tree, &text_for_apply, injection_layers)
+                } else {
+                    false
+                };
 
                 // Trigger re-render so the new highlights are displayed and
                 // apply the fold candidates extracted in the background.
+                // Increment text_revision to bust the PrepaintCache so that
+                // injection highlights (emphasis, bold, etc.) are repainted.
                 _ = entity.update(cx, |state, cx| {
+                    if applied {
+                        state.text_revision += 1;
+                    }
                     if is_folding {
                         state.display_map.set_fold_candidates(fold_ranges);
                     }
@@ -2904,9 +2918,11 @@ impl Render for InputState {
                 Self::dispatch_background_parse(bg, window, cx);
                 self.text_revision += 1;
                 self.schedule_deferred_update(cx);
-            } else {
-                self.update_derived_states(cx);
             }
+            // Always derive states so the main-tree highlights (headings, etc.)
+            // are visible immediately, even when injection parsing is deferred
+            // to a background thread.
+            self.update_derived_states(cx);
 
             self.update_fold_candidates();
             self.lsp.update(&self.text, window, cx);
