@@ -384,7 +384,6 @@ impl LastLayout {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct PrepaintCacheKey {
-    pub(super) text_revision: u64,
     pub(super) heading_levels_revision: u64,
     pub(super) wrap_width: Option<Pixels>,
     pub(super) buffer_line_count: usize,

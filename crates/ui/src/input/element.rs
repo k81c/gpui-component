@@ -1623,7 +1623,6 @@ impl Element for TextElement {
             };
 
             let key = PrepaintCacheKey {
-                text_revision: state.text_revision,
                 heading_levels_revision: state.heading_levels_revision,
                 wrap_width,
                 buffer_line_count: state.display_map.buffer_line_count(),

@@ -635,13 +635,10 @@ impl SyntaxHighlighter {
         if self.has_injections() {
             // Injection parsing is deferred to a background thread to avoid
             // blocking the main thread on every keystroke.
-            // Apply the edit to each existing injection tree so that byte
-            // offsets remain approximately correct until the background parse
-            // completes; this minimises visual artefacts.
-            for layer in &mut self.injection_layers {
-                layer.tree.edit(&edit);
-                layer.byte_range = Self::shift_byte_range(&layer.byte_range, &edit);
-            }
+            // Stale injection trees queried against new text produce incorrect
+            // highlights (wrong emphasis ranges, etc.), so clear them and wait
+            // for the background parse to restore correct layers.
+            self.injection_layers.clear();
             // Signal the caller to dispatch a background parse.
             SyntaxHighlightUpdate::PendingInjections
         } else {
@@ -875,6 +872,10 @@ impl SyntaxHighlighter {
     /// Positions before the edit start are unchanged; positions inside the
     /// replaced region are clamped to the new end; positions after are shifted
     /// by the net byte delta.
+    ///
+    /// Retained for the planned incremental injection update (changed-ranges
+    /// based layer reuse). Not currently called.
+    #[allow(dead_code)]
     fn shift_byte_range(range: &Range<usize>, edit: &InputEdit) -> Range<usize> {
         let delta: isize = edit.new_end_byte as isize - edit.old_end_byte as isize;
         let shift = |pos: usize| -> usize {
