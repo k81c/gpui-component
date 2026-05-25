@@ -12,7 +12,7 @@ use gpui::{
     px,
 };
 use gpui::{Half, TextAlign};
-use ropey::{Rope, RopeSlice};
+use ropey::{LineType, Rope, RopeSlice};
 use serde::Deserialize;
 use std::cell::Cell;
 use std::ops::Range;
@@ -773,6 +773,7 @@ impl InputState {
                 *highlighter.borrow_mut() = None;
                 parse_task.borrow_mut().take();
                 heading_levels.borrow_mut().clear();
+                self.heading_levels_revision += 1;
             }
             _ => {}
         }
@@ -798,6 +799,7 @@ impl InputState {
                 *highlighter.borrow_mut() = None;
                 parse_task.borrow_mut().take();
                 heading_levels.borrow_mut().clear();
+                self.heading_levels_revision += 1;
             }
             _ => {}
         }
@@ -2393,31 +2395,80 @@ impl InputState {
                 .row
         };
 
+        let old_start_point = old_text.offset_to_point(range.start.min(old_text.len()));
+        let is_line_insertion = range.is_empty()
+            && old_start_point.column == 0
+            && !new_text.is_empty()
+            && new_text.chars().all(|ch| ch == '\n');
         let old_start = old_start_row;
-        let old_end = if range.is_empty() {
+        let old_end = if is_line_insertion {
             old_start_row
+        } else if range.is_empty() {
+            old_start_row + 1
         } else {
             old_end_row + 1
         };
 
-        let new_rows_len = if new_text.is_empty() {
-            0
+        let new_rows_len = if is_line_insertion {
+            new_text.chars().filter(|ch| *ch == '\n').count()
         } else {
-            new_end_row.saturating_sub(new_start_row) + 1
+            (new_end_row.saturating_sub(new_start_row) + 1).max(1)
         };
 
         let mut levels = heading_levels.borrow_mut();
         let levels_len = levels.len();
         let old_start = old_start.min(levels_len);
         let old_end = old_end.min(levels_len).max(old_start);
+        let replacement_len = new_rows_len;
+        let target_len = self.display_map.buffer_line_count();
+        let changed = old_end.saturating_sub(old_start) != replacement_len
+            || levels[old_start..old_end].iter().any(Option::is_some)
+            || target_len != levels_len;
 
         levels.splice(
             old_start..old_end,
-            std::iter::repeat(None).take(new_rows_len),
+            std::iter::repeat(None).take(replacement_len),
         );
 
-        let target_len = self.display_map.buffer_line_count();
         levels.resize(target_len, None);
+        if changed {
+            self.heading_levels_revision += 1;
+        }
+    }
+
+    fn marked_heading_refresh_rows_for_edit(
+        &self,
+        old_text: &Rope,
+        range: &Range<usize>,
+        new_text: &str,
+    ) -> Range<usize> {
+        let line_count = self.text.len_lines(LineType::LF);
+        let old_start_row = old_text
+            .offset_to_point(range.start.min(old_text.len()))
+            .row;
+        let old_end_row = if range.is_empty() {
+            old_start_row
+        } else {
+            old_text
+                .offset_to_point((range.end - 1).min(old_text.len()))
+                .row
+        };
+        let new_start_row = self
+            .text
+            .offset_to_point(range.start.min(self.text.len()))
+            .row;
+        let new_end_row = if new_text.is_empty() {
+            new_start_row
+        } else {
+            self.text
+                .offset_to_point((range.start + new_text.len() - 1).min(self.text.len()))
+                .row
+        };
+
+        let start = old_start_row.min(new_start_row).saturating_sub(1);
+        let edited_old_rows = old_end_row.saturating_sub(old_start_row);
+        let end = (new_end_row.max(new_start_row + edited_old_rows) + 2).min(line_count);
+        start.min(line_count)..end.max(start).min(line_count)
     }
 
     pub(super) fn schedule_deferred_update(&mut self, cx: &mut Context<Self>) {
@@ -2469,23 +2520,80 @@ impl InputState {
     }
 
     fn update_derived_states(&mut self, cx: &mut Context<Self>) {
-        if let InputMode::MarkedEditor {
+        self.refresh_marked_heading_levels_from_highlighter();
+        cx.notify();
+    }
+
+    fn refresh_marked_heading_levels_from_highlighter(&mut self) -> bool {
+        let InputMode::MarkedEditor {
             highlighter,
             heading_levels,
             ..
         } = &self.mode
-        {
-            let mut heading_levels_updated = false;
-            if let Some(h) = highlighter.borrow().as_ref() {
-                let new_heading_levels = h.heading_levels();
-                *heading_levels.borrow_mut() = new_heading_levels;
-                heading_levels_updated = true;
-            }
-            if heading_levels_updated {
-                self.heading_levels_revision += 1;
+        else {
+            return false;
+        };
+
+        let highlighter_borrow = highlighter.borrow();
+        let Some(h) = highlighter_borrow.as_ref() else {
+            return false;
+        };
+
+        let new_heading_levels = h.heading_levels();
+        let mut levels = heading_levels.borrow_mut();
+        if *levels == new_heading_levels {
+            return false;
+        }
+
+        *levels = new_heading_levels;
+        self.heading_levels_revision += 1;
+        true
+    }
+
+    fn refresh_marked_heading_levels_in_rows_from_highlighter(
+        &mut self,
+        rows: Range<usize>,
+    ) -> bool {
+        if rows.is_empty() {
+            return false;
+        }
+
+        let InputMode::MarkedEditor {
+            highlighter,
+            heading_levels,
+            ..
+        } = &self.mode
+        else {
+            return false;
+        };
+
+        let highlighter_borrow = highlighter.borrow();
+        let Some(h) = highlighter_borrow.as_ref() else {
+            return false;
+        };
+
+        let updates = h.heading_levels_in_rows(rows);
+        let mut levels = heading_levels.borrow_mut();
+        let target_len = self.display_map.buffer_line_count();
+        if levels.len() != target_len {
+            levels.resize(target_len, None);
+        }
+
+        let mut changed = false;
+        for (row, level) in updates {
+            let Some(current) = levels.get_mut(row) else {
+                continue;
+            };
+            if *current != level {
+                *current = level;
+                changed = true;
             }
         }
-        cx.notify();
+
+        if changed {
+            self.heading_levels_revision += 1;
+        }
+        changed
     }
 
     /// Spawn a background parse after the synchronous parse timed out.
@@ -2585,6 +2693,7 @@ impl InputState {
                 _ = entity.update(cx, |state, cx| {
                     if applied {
                         state.text_revision += 1;
+                        state.refresh_marked_heading_levels_from_highlighter();
                     }
                     if is_folding {
                         state.display_map.set_fold_candidates(fold_ranges);
@@ -2706,10 +2815,13 @@ impl EntityInputHandler for InputState {
         self.display_map
             .on_text_changed(&self.text, &range, &Rope::from(new_text), cx);
         self.project_marked_heading_levels_for_edit(&old_text, &range, new_text);
+        let heading_refresh_rows =
+            self.marked_heading_refresh_rows_for_edit(&old_text, &range, new_text);
 
         let bg = self
             .mode
             .update_highlighter(&range, &old_text, &self.text, &new_text, true, cx);
+        self.refresh_marked_heading_levels_in_rows_from_highlighter(heading_refresh_rows);
         if let Some(bg) = bg {
             Self::dispatch_background_parse(bg, window, cx);
         }
@@ -2776,10 +2888,13 @@ impl EntityInputHandler for InputState {
         self.display_map
             .on_text_changed(&self.text, &range, &Rope::from(new_text), cx);
         self.project_marked_heading_levels_for_edit(&old_text, &range, new_text);
+        let heading_refresh_rows =
+            self.marked_heading_refresh_rows_for_edit(&old_text, &range, new_text);
 
         let bg = self
             .mode
             .update_highlighter(&range, &old_text, &self.text, &new_text, true, cx);
+        self.refresh_marked_heading_levels_in_rows_from_highlighter(heading_refresh_rows);
         if let Some(bg) = bg {
             Self::dispatch_background_parse(bg, window, cx);
         }
@@ -2914,6 +3029,7 @@ impl Render for InputState {
             let bg = self
                 .mode
                 .update_highlighter(&(0..0), &self.text, &self.text, "", false, cx);
+            self.refresh_marked_heading_levels_from_highlighter();
             if let Some(bg) = bg {
                 Self::dispatch_background_parse(bg, window, cx);
                 self.text_revision += 1;
@@ -3098,6 +3214,7 @@ ORDER BY id
     }
 
     #[gpui::test]
+    #[cfg(feature = "tree-sitter-markdown")]
     fn test_heading_levels_shift_on_edit(cx: &mut TestAppContext) {
         let mut input: Option<Entity<InputState>> = None;
         let window = cx.update(|cx| {
@@ -3178,6 +3295,199 @@ ORDER BY id
                 assert_eq!(levels[1], None);
                 assert_eq!(levels[2], Some(2));
                 assert_eq!(levels[3], Some(3));
+            });
+        });
+    }
+
+    #[gpui::test]
+    #[cfg(feature = "tree-sitter-djot")]
+    fn test_marked_editor_djot_heading_levels_after_set_value(cx: &mut TestAppContext) {
+        let mut input: Option<Entity<InputState>> = None;
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.set_global(Theme::default());
+                super::super::init(cx);
+                input = Some(cx.new(|cx| InputState::new(window, cx).marked_editor("djot")));
+                cx.new(|cx| crate::Root::new(input.clone().unwrap(), window, cx))
+            })
+            .unwrap()
+        });
+
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let input = input.unwrap();
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value("# A\nB\n## C\n", window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let levels = state.mode.marked_heading_levels().unwrap().borrow().clone();
+                assert_eq!(levels, vec![Some(1), None, Some(2), None]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    #[cfg(feature = "tree-sitter-asciidoc")]
+    fn test_marked_editor_asciidoc_heading_levels_after_set_value(cx: &mut TestAppContext) {
+        let mut input: Option<Entity<InputState>> = None;
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.set_global(Theme::default());
+                super::super::init(cx);
+                input = Some(cx.new(|cx| InputState::new(window, cx).marked_editor("asciidoc")));
+                cx.new(|cx| crate::Root::new(input.clone().unwrap(), window, cx))
+            })
+            .unwrap()
+        });
+
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let input = input.unwrap();
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value("= A\n\n== C\n", window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let levels = state.mode.marked_heading_levels().unwrap().borrow().clone();
+                assert_eq!(levels, vec![Some(1), None, Some(2), None]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    #[cfg(feature = "tree-sitter-markdown")]
+    fn test_marked_editor_heading_levels_update_edited_row(cx: &mut TestAppContext) {
+        let mut input: Option<Entity<InputState>> = None;
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.set_global(Theme::default());
+                super::super::init(cx);
+                input = Some(cx.new(|cx| InputState::new(window, cx).marked_editor("markdown")));
+                cx.new(|cx| crate::Root::new(input.clone().unwrap(), window, cx))
+            })
+            .unwrap()
+        });
+
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let input = input.unwrap();
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value("# A\nBody\n", window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let body_offset =
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.text.line_start_offset(1)));
+        let initial_revision =
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.heading_levels_revision));
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.replace_text_in_range(Some(body_offset..body_offset), "## ", window, cx);
+            });
+        });
+
+        let after_insert_revision = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let levels = state.mode.marked_heading_levels().unwrap().borrow().clone();
+                assert_eq!(levels, vec![Some(1), Some(2), None]);
+                state.heading_levels_revision
+            })
+        });
+        assert!(after_insert_revision > initial_revision);
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.replace_text_in_range(
+                    Some(body_offset..body_offset + "## ".len()),
+                    "",
+                    window,
+                    cx,
+                );
+            });
+        });
+
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let levels = state.mode.marked_heading_levels().unwrap().borrow().clone();
+                assert_eq!(levels, vec![Some(1), None, None]);
+                assert!(state.heading_levels_revision > after_insert_revision);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_marked_editor_highlighter_reset_clears_heading_revision(cx: &mut TestAppContext) {
+        let mut input: Option<Entity<InputState>> = None;
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.set_global(Theme::default());
+                super::super::init(cx);
+                input = Some(cx.new(|cx| InputState::new(window, cx).marked_editor("markdown")));
+                cx.new(|cx| crate::Root::new(input.clone().unwrap(), window, cx))
+            })
+            .unwrap()
+        });
+
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let input = input.unwrap();
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value("# A\n", window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let revision_before_clear =
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.heading_levels_revision));
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.set_highlighter("djot", cx);
+            });
+        });
+        let revision_after_set = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                assert!(
+                    state
+                        .mode
+                        .marked_heading_levels()
+                        .unwrap()
+                        .borrow()
+                        .is_empty()
+                );
+                state.heading_levels_revision
+            })
+        });
+        assert!(revision_after_set > revision_before_clear);
+
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.reset_highlighter(cx);
+            });
+        });
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                assert!(
+                    state
+                        .mode
+                        .marked_heading_levels()
+                        .unwrap()
+                        .borrow()
+                        .is_empty()
+                );
+                assert!(state.heading_levels_revision > revision_after_set);
             });
         });
     }

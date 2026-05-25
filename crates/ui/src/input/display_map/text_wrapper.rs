@@ -621,7 +621,7 @@ mod tests {
     use super::*;
     use std::rc::Rc;
 
-    use crate::input::{LayoutMap, LineMetrics};
+    use crate::input::LayoutMap;
     use gpui::{Boundary, FontFeatures, FontStyle, FontWeight, px};
 
     #[test]

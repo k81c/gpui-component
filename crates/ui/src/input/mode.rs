@@ -7,10 +7,10 @@ use ropey::Rope;
 
 use super::display_map::DisplayMap;
 use crate::highlighter::DiagnosticSet;
-use crate::highlighter::SyntaxHighlighter;
+use crate::highlighter::{SyntaxHighlightUpdate, SyntaxHighlighter};
+use crate::input::{InputEdit, RopeExt as _, TabSize};
 #[cfg(not(target_family = "wasm"))]
 use tree_sitter::Tree;
-use crate::input::{InputEdit, RopeExt as _, TabSize};
 
 #[allow(dead_code)]
 pub(super) struct PendingBackgroundParse {
@@ -319,34 +319,34 @@ impl InputMode {
 
                 let edit = replacement_input_edit(old_text, new_text, selected_range, change_text);
                 const SYNC_PARSE_TIMEOUT: Duration = Duration::from_millis(2);
-                let completed = h.update(Some(edit), new_text, Some(SYNC_PARSE_TIMEOUT));
-                if completed {
-                    // Sync parse succeeded, cancel any pending background parse.
-                    parse_task.borrow_mut().take();
-                    None
-                } else {
-                    // update() returned false: either timed out or has injections.
-                    // If it has injections the main tree is already correct;
-                    // hand it to the background task to skip re-parsing it.
-                    #[cfg(not(target_family = "wasm"))]
-                    let pre_parsed_tree = if h.has_injections() {
-                        h.tree().cloned()
-                    } else {
+                let status = h.update_with_status(Some(edit), new_text, Some(SYNC_PARSE_TIMEOUT));
+                match status {
+                    SyntaxHighlightUpdate::Complete => {
+                        // Sync parse succeeded, cancel any pending background parse.
+                        parse_task.borrow_mut().take();
                         None
-                    };
-                    // Timed out. Return the data needed for background parsing.
-                    let pending = PendingBackgroundParse {
-                        language: h.language().clone(),
-                        text: new_text.clone(),
-                        highlighter: highlighter.clone(),
-                        parse_task: parse_task.clone(),
-                        is_folding: *folding,
+                    }
+                    SyntaxHighlightUpdate::PendingInjections | SyntaxHighlightUpdate::TimedOut => {
                         #[cfg(not(target_family = "wasm"))]
-                        pre_parsed_tree,
-                        input_edit: edit,
-                    };
-                    drop(highlighter_ref);
-                    Some(pending)
+                        let pre_parsed_tree =
+                            if matches!(status, SyntaxHighlightUpdate::PendingInjections) {
+                                h.tree().cloned()
+                            } else {
+                                None
+                            };
+                        let pending = PendingBackgroundParse {
+                            language: h.language().clone(),
+                            text: new_text.clone(),
+                            highlighter: highlighter.clone(),
+                            parse_task: parse_task.clone(),
+                            is_folding: *folding,
+                            #[cfg(not(target_family = "wasm"))]
+                            pre_parsed_tree,
+                            input_edit: edit,
+                        };
+                        drop(highlighter_ref);
+                        Some(pending)
+                    }
                 }
             }
             InputMode::MarkedEditor {
@@ -372,30 +372,33 @@ impl InputMode {
 
                 let edit = replacement_input_edit(old_text, new_text, selected_range, change_text);
                 const SYNC_PARSE_TIMEOUT: Duration = Duration::from_millis(2);
-                let completed = h.update(Some(edit), new_text, Some(SYNC_PARSE_TIMEOUT));
-
-                if completed {
-                    parse_task.borrow_mut().take();
-                    None
-                } else {
-                    #[cfg(not(target_family = "wasm"))]
-                    let pre_parsed_tree = if h.has_injections() {
-                        h.tree().cloned()
-                    } else {
+                let status = h.update_with_status(Some(edit), new_text, Some(SYNC_PARSE_TIMEOUT));
+                match status {
+                    SyntaxHighlightUpdate::Complete => {
+                        parse_task.borrow_mut().take();
                         None
-                    };
-                    let pending = PendingBackgroundParse {
-                        language: h.language().clone(),
-                        text: new_text.clone(),
-                        highlighter: highlighter.clone(),
-                        parse_task: parse_task.clone(),
-                        is_folding: *folding,
+                    }
+                    SyntaxHighlightUpdate::PendingInjections | SyntaxHighlightUpdate::TimedOut => {
                         #[cfg(not(target_family = "wasm"))]
-                        pre_parsed_tree,
-                        input_edit: edit,
-                    };
-                    drop(highlighter_ref);
-                    Some(pending)
+                        let pre_parsed_tree =
+                            if matches!(status, SyntaxHighlightUpdate::PendingInjections) {
+                                h.tree().cloned()
+                            } else {
+                                None
+                            };
+                        let pending = PendingBackgroundParse {
+                            language: h.language().clone(),
+                            text: new_text.clone(),
+                            highlighter: highlighter.clone(),
+                            parse_task: parse_task.clone(),
+                            is_folding: *folding,
+                            #[cfg(not(target_family = "wasm"))]
+                            pre_parsed_tree,
+                            input_edit: edit,
+                        };
+                        drop(highlighter_ref);
+                        Some(pending)
+                    }
                 }
             }
             _ => None,

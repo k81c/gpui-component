@@ -52,11 +52,17 @@ pub struct SyntaxHighlighter {
     injection_layers: Vec<InjectionLayer>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyntaxHighlightUpdate {
+    Complete,
+    PendingInjections,
+    TimedOut,
+}
+
 /// A parsed injection layer.
 /// Stores the parsed tree and the ranges it covers.
 pub(crate) struct InjectionLayer {
     pub(crate) language_name: SharedString,
-    pub(crate) ranges: Vec<tree_sitter::Range>,
     pub(crate) byte_range: Range<usize>,
     pub(crate) tree: Tree,
 }
@@ -75,7 +81,6 @@ pub(crate) struct InjectionParseData {
 
 pub(crate) struct ReusableInjectionLayer {
     pub(crate) language_name: SharedString,
-    pub(crate) ranges: Vec<tree_sitter::Range>,
     pub(crate) tree: Tree,
 }
 
@@ -445,6 +450,41 @@ impl SyntaxHighlighter {
         levels
     }
 
+    pub(crate) fn heading_levels_in_rows(&self, rows: Range<usize>) -> Vec<(usize, Option<u8>)> {
+        let line_count = self.text.len_lines(LineType::LF);
+        let start = rows.start.min(line_count);
+        let end = rows.end.min(line_count).max(start);
+        let mut levels = vec![None; end.saturating_sub(start)];
+        let Some(tree) = self.tree.as_ref() else {
+            return (start..end).map(|row| (row, None)).collect();
+        };
+
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            let node_start = node.start_position().row;
+            let node_end = node.end_position().row;
+            if node_end < start || node_start >= end {
+                continue;
+            }
+
+            let child_count = node.child_count();
+            for i in (0..child_count).rev() {
+                if let Some(child) = node.child(i as u32) {
+                    stack.push(child);
+                }
+            }
+
+            let Some(level) = Self::detect_heading_level(&self.language, &self.text, &node) else {
+                continue;
+            };
+            if (start..end).contains(&node_start) {
+                levels[node_start - start] = Some(level);
+            }
+        }
+
+        (start..end).zip(levels).collect()
+    }
+
     fn detect_heading_level(lang: &str, text: &Rope, node: &tree_sitter::Node) -> Option<u8> {
         let kind = node.kind();
         let byte_range = node.start_byte()..node.end_byte();
@@ -522,14 +562,14 @@ impl SyntaxHighlighter {
         self.injections_query.is_some()
     }
 
-    pub fn update(
+    pub(crate) fn update_with_status(
         &mut self,
         edit: Option<InputEdit>,
         text: &Rope,
         timeout: Option<Duration>,
-    ) -> bool {
+    ) -> SyntaxHighlightUpdate {
         if self.text.eq(text) {
-            return true;
+            return SyntaxHighlightUpdate::Complete;
         }
 
         let edit = edit.unwrap_or(InputEdit {
@@ -580,12 +620,17 @@ impl SyntaxHighlighter {
             // Restore the old tree so highlighting continues with stale data.
             self.tree = Some(old_tree);
             self.text = text.clone();
-            return false;
+            return SyntaxHighlightUpdate::TimedOut;
         }
 
         let new_tree = new_tree.unwrap();
         self.tree = Some(new_tree.clone());
         self.text = text.clone();
+
+        if timeout.is_none() {
+            self.parse_injection_layers(&new_tree);
+            return SyntaxHighlightUpdate::Complete;
+        }
 
         if self.has_injections() {
             // Injection parsing is deferred to a background thread to avoid
@@ -598,11 +643,23 @@ impl SyntaxHighlighter {
                 layer.byte_range = Self::shift_byte_range(&layer.byte_range, &edit);
             }
             // Signal the caller to dispatch a background parse.
-            false
+            SyntaxHighlightUpdate::PendingInjections
         } else {
             self.parse_injection_layers(&new_tree);
-            true
+            SyntaxHighlightUpdate::Complete
         }
+    }
+
+    pub fn update(
+        &mut self,
+        edit: Option<InputEdit>,
+        text: &Rope,
+        timeout: Option<Duration>,
+    ) -> bool {
+        matches!(
+            self.update_with_status(edit, text, timeout),
+            SyntaxHighlightUpdate::Complete
+        )
     }
 
     /// Returns the data needed to compute injection layers on a background thread.
@@ -618,7 +675,6 @@ impl SyntaxHighlighter {
                 .iter()
                 .map(|layer| ReusableInjectionLayer {
                     language_name: layer.language_name.clone(),
-                    ranges: layer.ranges.clone(),
                     tree: layer.tree.clone(),
                 })
                 .collect(),
@@ -642,26 +698,12 @@ impl SyntaxHighlighter {
             });
         }
 
-        fn ranges_cache_key(ranges: &[tree_sitter::Range]) -> Vec<(usize, usize)> {
-            ranges.iter().map(|r| (r.start_byte, r.end_byte)).collect()
-        }
-
         let root_node = tree.root_node();
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&data.query, root_node, TextProvider(text));
 
         let mut combined_ranges: FxHashMap<SharedString, Vec<tree_sitter::Range>> =
             FxHashMap::default();
-        let old_layer_trees: FxHashMap<_, _> = data
-            .old_layers
-            .iter()
-            .map(|layer| {
-                (
-                    (layer.language_name.clone(), ranges_cache_key(&layer.ranges)),
-                    &layer.tree,
-                )
-            })
-            .collect();
         let mut new_layers = Vec::new();
         while let Some(query_match) = matches.next() {
             let mut language_name: Option<SharedString> = None;
@@ -712,11 +754,9 @@ impl SyntaxHighlighter {
                     .or_default()
                     .extend(ranges);
             } else {
-                let old_tree = old_layer_trees
-                    .get(&(language_name.clone(), ranges_cache_key(&ranges)))
-                    .copied();
+                let old_tree = Self::reusable_injection_tree(&data, &language_name, &ranges);
                 if let Some(layer) =
-                    Self::parse_injection_layer(&language_name, ranges, old_tree, text)
+                    Self::parse_injection_layer(&language_name, ranges, old_tree.as_ref(), text)
                 {
                     new_layers.push(layer);
                 }
@@ -729,32 +769,7 @@ impl SyntaxHighlighter {
             }
             sort_ranges(&mut ranges);
 
-            // Try to reuse the old injection tree via incremental parsing.
-            // Apply the edit to the old tree so that `included_ranges()` returns
-            // shifted byte offsets; if those match the newly-queried ranges the
-            // structure of the injection is unchanged and we can do a diff-parse.
-            // If they differ (structural change or multi-edit race) fall back to
-            // a full re-parse by passing `old_tree = None`, which is always safe.
-            let old_tree: Option<Tree> = data
-                .old_layers
-                .iter()
-                .find(|layer| layer.language_name == language_name)
-                .and_then(|old_layer| {
-                    let mut edited_tree = old_layer.tree.clone();
-                    edited_tree.edit(&data.edit);
-                    let shifted: Vec<(usize, usize)> = edited_tree
-                        .included_ranges()
-                        .iter()
-                        .map(|r| (r.start_byte, r.end_byte))
-                        .collect();
-                    let queried: Vec<(usize, usize)> =
-                        ranges.iter().map(|r| (r.start_byte, r.end_byte)).collect();
-                    if shifted == queried {
-                        Some(edited_tree)
-                    } else {
-                        None // structural change or multi-edit: full re-parse
-                    }
-                });
+            let old_tree = Self::reusable_injection_tree(&data, &language_name, &ranges);
 
             if let Some(layer) =
                 Self::parse_injection_layer(&language_name, ranges, old_tree.as_ref(), text)
@@ -764,6 +779,34 @@ impl SyntaxHighlighter {
         }
         new_layers.sort_by_key(|layer| layer.byte_range.start);
         new_layers
+    }
+
+    fn reusable_injection_tree(
+        data: &InjectionParseData,
+        language_name: &SharedString,
+        ranges: &[tree_sitter::Range],
+    ) -> Option<Tree> {
+        fn range_key(ranges: &[tree_sitter::Range]) -> Vec<(usize, usize)> {
+            ranges.iter().map(|r| (r.start_byte, r.end_byte)).collect()
+        }
+
+        let queried = range_key(ranges);
+        data.old_layers
+            .iter()
+            .filter(|layer| layer.language_name == *language_name)
+            .find_map(|old_layer| {
+                if range_key(&old_layer.tree.included_ranges()) == queried {
+                    return Some(old_layer.tree.clone());
+                }
+
+                let mut edited_tree = old_layer.tree.clone();
+                edited_tree.edit(&data.edit);
+                if range_key(&edited_tree.included_ranges()) == queried {
+                    Some(edited_tree)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Parse one injection layer over the given included ranges.
@@ -800,7 +843,6 @@ impl SyntaxHighlighter {
         let byte_range = bounding_byte_range(&ranges)?;
         Some(InjectionLayer {
             language_name: language_name.clone(),
-            ranges,
             byte_range,
             tree: new_tree,
         })
@@ -1463,6 +1505,7 @@ $x = 1;
         );
     }
 
+    #[allow(dead_code)]
     fn parse_tree(lang: &str, source: &str) -> Tree {
         let config = LanguageRegistry::singleton()
             .language(lang)
@@ -1472,6 +1515,7 @@ $x = 1;
         parser.parse(source, None).unwrap()
     }
 
+    #[allow(dead_code)]
     fn capture_rows_with_first_matching_query(
         lang: &str,
         source: &str,
@@ -1534,6 +1578,93 @@ $x = 1;
             "heading",
         );
         assert_eq!(rows, vec![0, 2, 3]);
+    }
+
+    #[test]
+    #[cfg(feature = "tree-sitter-markdown")]
+    fn test_heading_levels_in_rows_limits_result_rows() {
+        let source = "# A\nText\n## B\nText\n### C\n";
+        let rope = Rope::from_str(source);
+        let mut highlighter = SyntaxHighlighter::new("markdown");
+        assert!(highlighter.update(None, &rope, None));
+
+        assert_eq!(
+            highlighter.heading_levels_in_rows(1..4),
+            vec![(1, None), (2, Some(2)), (3, None)]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "tree-sitter-asciidoc")]
+    fn test_update_with_status_reports_pending_injections() {
+        let source = "= A\n\nThis has *bold* text.\n";
+        let rope = Rope::from_str(source);
+        let mut highlighter = SyntaxHighlighter::new("asciidoc");
+
+        assert_eq!(
+            highlighter.update_with_status(None, &rope, Some(Duration::from_millis(2))),
+            SyntaxHighlightUpdate::PendingInjections
+        );
+        assert!(highlighter.tree().is_some());
+    }
+
+    #[test]
+    #[cfg(not(target_family = "wasm"))]
+    fn test_reusable_injection_tree_matches_shifted_non_combined_range() {
+        let old_source = "  [1,2]";
+        let old_range = tree_sitter::Range {
+            start_byte: 2,
+            end_byte: old_source.len(),
+            start_point: Point::new(0, 2),
+            end_point: Point::new(0, old_source.len()),
+        };
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_json::LANGUAGE.into())
+            .expect("JSON parser should load");
+        parser
+            .set_included_ranges(&[old_range])
+            .expect("included range should be valid");
+        let old_tree = parser
+            .parse(old_source, None)
+            .expect("old JSON should parse");
+        let edit = InputEdit {
+            start_byte: 0,
+            old_end_byte: 0,
+            new_end_byte: 2,
+            start_position: Point::new(0, 0),
+            old_end_position: Point::new(0, 0),
+            new_end_position: Point::new(0, 2),
+        };
+        let new_range = tree_sitter::Range {
+            start_byte: 4,
+            end_byte: old_source.len() + 2,
+            start_point: Point::new(0, 4),
+            end_point: Point::new(0, old_source.len() + 2),
+        };
+        let language_name = SharedString::from("json");
+        let query = Arc::new(
+            Query::new(
+                &tree_sitter_json::LANGUAGE.into(),
+                "(document) @injection.content",
+            )
+            .expect("query should compile"),
+        );
+        let data = InjectionParseData {
+            query,
+            content_capture_index: None,
+            language_capture_index: None,
+            old_layers: vec![ReusableInjectionLayer {
+                language_name: language_name.clone(),
+                tree: old_tree,
+            }],
+            edit,
+        };
+
+        let reused =
+            SyntaxHighlighter::reusable_injection_tree(&data, &language_name, &[new_range])
+                .expect("shifted range should reuse the old tree");
+        assert_eq!(reused.included_ranges()[0].start_byte, new_range.start_byte);
     }
 
     #[test]
@@ -1620,28 +1751,10 @@ $x = 1;
         let source = "= Title\n\nThis has *bold text* and _italic text_ here.\n";
         let rope = Rope::from_str(source);
         let mut highlighter = SyntaxHighlighter::new("asciidoc");
-        highlighter.update(None, &rope, None);
-
-        // update() は has_injections のため false を返し injection_layers を同期更新しない。
-        // background parse をシミュレートして injection_layers を手動適用する。
-        {
-            use tree_sitter::{InputEdit, Point};
-            let tree = highlighter.tree().cloned().expect("main tree should be present");
-            // 初回ロードは no-op edit (0→len)
-            let fake_edit = InputEdit {
-                start_byte: 0,
-                old_end_byte: 0,
-                new_end_byte: rope.len(),
-                start_position: Point::new(0, 0),
-                old_end_position: Point::new(0, 0),
-                new_end_position: Point::new(0, rope.len()),
-            };
-            if let Some(data) = highlighter.injection_parse_data(fake_edit) {
-                let layers =
-                    SyntaxHighlighter::compute_injection_layers(data, &tree, &rope);
-                highlighter.apply_background_tree(tree, &rope, layers);
-            }
-        }
+        assert!(
+            highlighter.update(None, &rope, None),
+            "sync parse should complete and apply injections when timeout is None"
+        );
 
         let highlights = highlighter.match_styles(0..source.len());
 
