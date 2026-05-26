@@ -23,6 +23,7 @@ impl SyntaxHighlighter {
         &self,
         _range: &Range<usize>,
         _theme: &HighlightTheme,
+        _ime_marked_range: Option<Range<usize>>,
     ) -> Vec<(Range<usize>, HighlightStyle)> {
         Vec::new()
     }

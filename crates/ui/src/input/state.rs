@@ -755,22 +755,26 @@ impl InputState {
                 language,
                 highlighter,
                 parse_task,
+                windowed_parse_task,
                 ..
             } => {
                 *language = new_language.into();
                 *highlighter.borrow_mut() = None;
                 parse_task.borrow_mut().take();
+                windowed_parse_task.borrow_mut().take();
             }
             InputMode::MarkedEditor {
                 language,
                 highlighter,
                 parse_task,
+                windowed_parse_task,
                 heading_levels,
                 ..
             } => {
                 *language = new_language.into();
                 *highlighter.borrow_mut() = None;
                 parse_task.borrow_mut().take();
+                windowed_parse_task.borrow_mut().take();
                 heading_levels.borrow_mut().clear();
                 self.heading_levels_revision += 1;
             }
@@ -784,19 +788,23 @@ impl InputState {
             InputMode::CodeEditor {
                 highlighter,
                 parse_task,
+                windowed_parse_task,
                 ..
             } => {
                 *highlighter.borrow_mut() = None;
                 parse_task.borrow_mut().take();
+                windowed_parse_task.borrow_mut().take();
             }
             InputMode::MarkedEditor {
                 highlighter,
                 parse_task,
+                windowed_parse_task,
                 heading_levels,
                 ..
             } => {
                 *highlighter.borrow_mut() = None;
                 parse_task.borrow_mut().take();
+                windowed_parse_task.borrow_mut().take();
                 heading_levels.borrow_mut().clear();
                 self.heading_levels_revision += 1;
             }
@@ -2595,10 +2603,69 @@ impl InputState {
         changed
     }
 
+    /// Compute the byte range for a windowed parse.
+    ///
+    /// Snaps to empty-line boundaries so the partial tree has a grammatically
+    /// safe starting point. Returns `None` when the document is small enough
+    /// that a windowed parse offers no benefit (< 2 * WINDOW_MARGIN_LINES).
+    #[cfg(not(target_family = "wasm"))]
+    fn compute_parse_window(
+        text: &Rope,
+        edit_byte: usize,
+        visible_byte_range: Option<Range<usize>>,
+    ) -> Option<Range<usize>> {
+        use ropey::LineType;
+        const WINDOW_MARGIN_LINES: usize = 300;
+        // Only bother for documents large enough to benefit.
+        let total_lines = text.len_lines(LineType::LF);
+        if total_lines < WINDOW_MARGIN_LINES * 2 {
+            return None;
+        }
+
+        let edit_line = text.offset_to_point(edit_byte.min(text.len())).row;
+        let (vis_start_line, vis_end_line) = if let Some(vr) = visible_byte_range {
+            let s = text.offset_to_point(vr.start.min(text.len())).row;
+            let e = text.offset_to_point(vr.end.min(text.len())).row;
+            (s, e)
+        } else {
+            (edit_line, edit_line)
+        };
+
+        let target_start = edit_line.min(vis_start_line);
+        let target_end = edit_line.max(vis_end_line);
+
+        let raw_start = target_start.saturating_sub(WINDOW_MARGIN_LINES);
+        let raw_end = (target_end + WINDOW_MARGIN_LINES).min(total_lines.saturating_sub(1));
+
+        // Snap start backward to the nearest empty line (paragraph boundary).
+        let snap_start = (0..=raw_start)
+            .rev()
+            .find(|&line| text.slice_line(line).to_string().trim().is_empty())
+            .unwrap_or(0);
+
+        // Snap end forward to the nearest empty line.
+        let snap_end = (raw_end..total_lines)
+            .find(|&line| text.slice_line(line).to_string().trim().is_empty())
+            .unwrap_or(total_lines.saturating_sub(1));
+
+        let start_byte = text.line_start_offset(snap_start);
+        let end_byte = if snap_end + 1 >= total_lines {
+            text.len()
+        } else {
+            text.line_start_offset(snap_end + 1)
+        };
+        Some(start_byte..end_byte)
+    }
+
     /// Spawn a background parse after the synchronous parse timed out.
     ///
-    /// Dropping the returned `Task` (stored in `parse_task`) cancels the
-    /// parse, which naturally debounces rapid edits.
+    /// Phase 1: windowed parse over `pending.parse_window` (fast, ~100 ms).
+    ///   Stored in `windowed_parse_task`. Dropping cancels it.
+    /// Phase 2: full document parse (slow). Stored in `parse_task`.
+    ///   Dropping cancels it (debounces rapid edits).
+    ///
+    /// The two tasks are fully independent: Phase 2 runs regardless of whether
+    /// Phase 1 is still in-flight or has already completed.
     #[cfg(not(target_family = "wasm"))]
     fn dispatch_background_parse(
         pending: super::mode::PendingBackgroundParse,
@@ -2607,26 +2674,120 @@ impl InputState {
     ) {
         let highlighter_rc = pending.highlighter;
         let parse_task_rc = pending.parse_task;
+        let windowed_parse_task_rc = pending.windowed_parse_task;
         let language = pending.language;
         let text = pending.text;
         let is_folding = pending.is_folding;
         let pre_parsed_tree = pending.pre_parsed_tree;
         let input_edit = pending.input_edit;
+        let parse_window = pending.parse_window;
+        let full_tree_revision_at_spawn = pending.full_tree_revision_at_spawn;
 
         let old_tree = highlighter_rc
             .borrow()
             .as_ref()
             .and_then(|h| h.tree().cloned());
 
-        // Extract injection parse data on the main thread before spawning, so that
-        // compute_injection_layers can also run on the background thread.
         let injection_data = highlighter_rc
             .borrow()
             .as_ref()
             .and_then(|h| h.injection_parse_data(input_edit));
 
+        // ── Phase 1: windowed parse ──────────────────────────────────────────
+        // Only useful when the synchronous parse timed out (main tree is stale).
+        // When status was PendingInjections the main tree is already up-to-date;
+        // spawning a windowed parse would query a partial tree against the full
+        // text and generate incorrect highlight ranges (e.g. false emphasis).
+        let parse_window_for_p2 = parse_window.clone();
+        if pending.timed_out {
+            if let Some(window_range) = parse_window {
+            let text_p1 = text.clone();
+            let language_p1 = language.clone();
+            let highlighter_rc_p1 = highlighter_rc.clone();
+            let window_range_p1 = window_range.clone();
+
+            let p1_task = cx.spawn_in(window, async move |entity, cx| {
+                let text_p1_for_apply = text_p1.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let Some(config) =
+                            LanguageRegistry::singleton().language(&language_p1)
+                        else {
+                            return None;
+                        };
+                        let mut parser = tree_sitter::Parser::new();
+                        if parser.set_language(&config.language).is_err() {
+                            return None;
+                        }
+                        // Restrict parsing to the window range.
+                        let ts_range = tree_sitter::Range {
+                            start_byte: window_range_p1.start,
+                            end_byte: window_range_p1.end,
+                            start_point: text_p1
+                                .offset_to_point(window_range_p1.start),
+                            end_point: text_p1
+                                .offset_to_point(window_range_p1.end),
+                        };
+                        if parser.set_included_ranges(&[ts_range]).is_err() {
+                            return None;
+                        }
+                        // No old_tree: windowed tree is incompatible with the
+                        // full-document tree for incremental reuse.
+                        let windowed_tree = parser.parse_with_options(
+                            &mut |offset, _| {
+                                if offset >= text_p1.len() {
+                                    ""
+                                } else {
+                                    let (chunk, chunk_byte_ix) = text_p1.chunk(offset);
+                                    &chunk[offset - chunk_byte_ix..]
+                                }
+                            },
+                            None,
+                            None,
+                        )?;
+                        Some(crate::highlighter::WindowedTree {
+                            byte_range: window_range_p1,
+                            tree: windowed_tree,
+                        })
+                    })
+                    .await;
+
+                if let Some(windowed) = result {
+                    _ = entity.update(cx, |state, cx| {
+                        if let Some(h) = highlighter_rc_p1.borrow_mut().as_mut() {
+                            if h.apply_windowed_tree(
+                                windowed,
+                                &text_p1_for_apply,
+                                full_tree_revision_at_spawn,
+                            ) {
+                                // Windowed tree applied: repaint so highlights
+                                // appear immediately without waiting for Phase 2.
+                                state.text_revision += 1;
+                                cx.notify();
+                            }
+                        }
+                    });
+                }
+            });
+
+            windowed_parse_task_rc.borrow_mut().replace(p1_task);
+            } // end if let Some(window_range)
+        } // end if pending.timed_out
+
+        // ── Phase 2: full document parse (debounced) ─────────────────────────
+        // The debounce works via task cancellation: replacing `parse_task_rc`
+        // drops the previous Task<()>, which cancels the timer and prevents the
+        // parse from running.  Only when the user pauses typing for
+        // PHASE2_DEBOUNCE_MS does the task survive long enough to parse.
+        const PHASE2_DEBOUNCE_MS: u64 = 300;
         let text_for_apply = text.clone();
-        let task = cx.spawn_in(window, async move |entity, cx| {
+        let p2_task = cx.spawn_in(window, async move |entity, cx| {
+            // Debounce: if another keystroke arrives before the timer fires,
+            // parse_task_rc is replaced and this task is dropped (cancelled).
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(PHASE2_DEBOUNCE_MS))
+                .await;
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -2634,8 +2795,6 @@ impl InputState {
                         return None;
                     };
 
-                    // If the main tree was already parsed synchronously (injection-only
-                    // background dispatch), reuse it directly to skip redundant re-parsing.
                     let new_tree = if let Some(tree) = pre_parsed_tree {
                         tree
                     } else {
@@ -2657,17 +2816,14 @@ impl InputState {
                         )?
                     };
 
-                    // Compute injection layers in the background to avoid blocking the
-                    // main thread with combined-injection parsing (e.g. PHP, HTML+JS/CSS).
                     let injection_layers = if let Some(data) = injection_data {
                         crate::highlighter::SyntaxHighlighter::compute_injection_layers(
-                            data, &new_tree, &text,
+                            data, &new_tree, &text, parse_window_for_p2,
                         )
                     } else {
                         Default::default()
                     };
 
-                    // Walk the syntax tree to extract fold ranges off the main thread.
                     let fold_ranges = if is_folding {
                         crate::input::display_map::extract_fold_ranges(&new_tree)
                     } else {
@@ -2685,10 +2841,6 @@ impl InputState {
                     false
                 };
 
-                // Trigger re-render so the new highlights are displayed and
-                // apply the fold candidates extracted in the background.
-                // Increment text_revision to bust the PrepaintCache so that
-                // injection highlights (emphasis, bold, etc.) are repainted.
                 _ = entity.update(cx, |state, cx| {
                     if applied {
                         state.text_revision += 1;
@@ -2702,7 +2854,7 @@ impl InputState {
             }
         });
 
-        parse_task_rc.borrow_mut().replace(task);
+        parse_task_rc.borrow_mut().replace(p2_task);
     }
 
     #[cfg(target_family = "wasm")]
@@ -2821,7 +2973,15 @@ impl EntityInputHandler for InputState {
             .mode
             .update_highlighter(&range, &old_text, &self.text, &new_text, true, cx);
         self.refresh_marked_heading_levels_in_rows_from_highlighter(heading_refresh_rows);
-        if let Some(bg) = bg {
+        if let Some(mut bg) = bg {
+            // Compute the parse window while we still have &self.
+            if bg.parse_window.is_none() {
+                bg.parse_window = Self::compute_parse_window(
+                    &bg.text,
+                    bg.input_edit.start_byte,
+                    self.last_layout.as_ref().map(|l| l.visible_range_offset.clone()),
+                );
+            }
             Self::dispatch_background_parse(bg, window, cx);
         }
 
@@ -2894,7 +3054,14 @@ impl EntityInputHandler for InputState {
             .mode
             .update_highlighter(&range, &old_text, &self.text, &new_text, true, cx);
         self.refresh_marked_heading_levels_in_rows_from_highlighter(heading_refresh_rows);
-        if let Some(bg) = bg {
+        if let Some(mut bg) = bg {
+            if bg.parse_window.is_none() {
+                bg.parse_window = Self::compute_parse_window(
+                    &bg.text,
+                    bg.input_edit.start_byte,
+                    self.last_layout.as_ref().map(|l| l.visible_range_offset.clone()),
+                );
+            }
             Self::dispatch_background_parse(bg, window, cx);
         }
 
@@ -3029,7 +3196,14 @@ impl Render for InputState {
                 .mode
                 .update_highlighter(&(0..0), &self.text, &self.text, "", false, cx);
             self.refresh_marked_heading_levels_from_highlighter();
-            if let Some(bg) = bg {
+            if let Some(mut bg) = bg {
+                if bg.parse_window.is_none() {
+                    bg.parse_window = Self::compute_parse_window(
+                        &bg.text,
+                        bg.input_edit.start_byte,
+                        self.last_layout.as_ref().map(|l| l.visible_range_offset.clone()),
+                    );
+                }
                 Self::dispatch_background_parse(bg, window, cx);
                 self.text_revision += 1;
                 self.schedule_deferred_update(cx);

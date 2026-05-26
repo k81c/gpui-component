@@ -16,6 +16,9 @@ use tree_sitter::Tree;
 pub(super) struct PendingBackgroundParse {
     pub highlighter: Rc<RefCell<Option<SyntaxHighlighter>>>,
     pub parse_task: Rc<RefCell<Option<Task<()>>>>,
+    /// Separate task slot for the windowed (Phase 1) parse so that it can be
+    /// cancelled independently from the full (Phase 2) parse.
+    pub windowed_parse_task: Rc<RefCell<Option<Task<()>>>>,
     pub language: SharedString,
     pub text: Rope,
     pub is_folding: bool,
@@ -28,6 +31,17 @@ pub(super) struct PendingBackgroundParse {
     /// The edit that triggered this parse, forwarded to `injection_parse_data`
     /// so `compute_injection_layers` can attempt incremental injection re-parsing.
     pub input_edit: InputEdit,
+    /// Byte range to parse for the fast windowed Phase-1 tree.
+    /// `None` means no windowed parse should be spawned (e.g. document is tiny).
+    pub parse_window: Option<Range<usize>>,
+    /// Snapshot of `full_tree_revision` at spawn time; used to guard
+    /// `apply_windowed_tree` against races with the full parse.
+    pub full_tree_revision_at_spawn: u64,
+    /// True when the synchronous parse timed out (main tree is stale).
+    /// False when the sync parse succeeded but injections are still pending
+    /// (main tree is up-to-date; only injection layers need rebuilding).
+    /// Phase 1 (windowed parse) is only useful in the timed-out case.
+    pub timed_out: bool,
 }
 
 #[derive(Clone)]
@@ -57,6 +71,7 @@ pub(crate) enum InputMode {
         highlighter: Rc<RefCell<Option<SyntaxHighlighter>>>,
         diagnostics: DiagnosticSet,
         parse_task: Rc<RefCell<Option<Task<()>>>>,
+        windowed_parse_task: Rc<RefCell<Option<Task<()>>>>,
     },
     /// A Markdown-oriented editor mode based on [`InputMode::CodeEditor`].
     ///
@@ -74,6 +89,7 @@ pub(crate) enum InputMode {
         heading_levels: Rc<RefCell<Vec<Option<u8>>>>,
         diagnostics: DiagnosticSet,
         parse_task: Rc<RefCell<Option<Task<()>>>>,
+        windowed_parse_task: Rc<RefCell<Option<Task<()>>>>,
     },
 }
 
@@ -107,6 +123,7 @@ impl InputMode {
             folding: true,
             diagnostics: DiagnosticSet::new(&Rope::new()),
             parse_task: Rc::new(RefCell::new(None)),
+            windowed_parse_task: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -124,6 +141,7 @@ impl InputMode {
             folding: true,
             diagnostics: DiagnosticSet::new(&Rope::new()),
             parse_task: Rc::new(RefCell::new(None)),
+            windowed_parse_task: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -301,6 +319,7 @@ impl InputMode {
                 highlighter,
                 parse_task,
                 folding,
+                windowed_parse_task,
                 ..
             } => {
                 if !force && highlighter.borrow().is_some() {
@@ -324,6 +343,7 @@ impl InputMode {
                     SyntaxHighlightUpdate::Complete => {
                         // Sync parse succeeded, cancel any pending background parse.
                         parse_task.borrow_mut().take();
+                        windowed_parse_task.borrow_mut().take();
                         None
                     }
                     SyntaxHighlightUpdate::PendingInjections | SyntaxHighlightUpdate::TimedOut => {
@@ -334,15 +354,22 @@ impl InputMode {
                             } else {
                                 None
                             };
+                        let timed_out =
+                            matches!(status, SyntaxHighlightUpdate::TimedOut);
+                        let full_tree_revision_at_spawn = h.full_tree_revision();
                         let pending = PendingBackgroundParse {
                             language: h.language().clone(),
                             text: new_text.clone(),
                             highlighter: highlighter.clone(),
                             parse_task: parse_task.clone(),
+                            windowed_parse_task: windowed_parse_task.clone(),
                             is_folding: *folding,
                             #[cfg(not(target_family = "wasm"))]
                             pre_parsed_tree,
                             input_edit: edit,
+                            parse_window: None, // filled in by dispatch_background_parse
+                            full_tree_revision_at_spawn,
+                            timed_out,
                         };
                         drop(highlighter_ref);
                         Some(pending)
@@ -354,6 +381,7 @@ impl InputMode {
                 highlighter,
                 parse_task,
                 folding,
+                windowed_parse_task,
                 ..
             } => {
                 if !force && highlighter.borrow().is_some() {
@@ -376,6 +404,7 @@ impl InputMode {
                 match status {
                     SyntaxHighlightUpdate::Complete => {
                         parse_task.borrow_mut().take();
+                        windowed_parse_task.borrow_mut().take();
                         None
                     }
                     SyntaxHighlightUpdate::PendingInjections | SyntaxHighlightUpdate::TimedOut => {
@@ -386,15 +415,22 @@ impl InputMode {
                             } else {
                                 None
                             };
+                        let timed_out =
+                            matches!(status, SyntaxHighlightUpdate::TimedOut);
+                        let full_tree_revision_at_spawn = h.full_tree_revision();
                         let pending = PendingBackgroundParse {
                             language: h.language().clone(),
                             text: new_text.clone(),
                             highlighter: highlighter.clone(),
                             parse_task: parse_task.clone(),
+                            windowed_parse_task: windowed_parse_task.clone(),
                             is_folding: *folding,
                             #[cfg(not(target_family = "wasm"))]
                             pre_parsed_tree,
                             input_edit: edit,
+                            parse_window: None, // filled in by dispatch_background_parse
+                            full_tree_revision_at_spawn,
+                            timed_out,
                         };
                         drop(highlighter_ref);
                         Some(pending)
@@ -545,6 +581,7 @@ mod tests {
             highlighter: Default::default(),
             diagnostics: DiagnosticSet::new(&Rope::new()),
             parse_task: Default::default(),
+            windowed_parse_task: Default::default(),
         };
         assert_eq!(mode.is_code_editor(), true);
         assert_eq!(mode.is_multi_line(), false);

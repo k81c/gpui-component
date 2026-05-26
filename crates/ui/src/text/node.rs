@@ -524,7 +524,7 @@ impl CodeBlock {
         if let Some(lang) = &lang {
             let mut highlighter = SyntaxHighlighter::new(&lang);
             highlighter.update(None, &Rope::from_str(code.as_str()), None);
-            styles = highlighter.styles(&(0..code.len()), highlight_theme);
+            styles = highlighter.styles(&(0..code.len()), highlight_theme, None);
         };
 
         let state = Arc::new(Mutex::new(InlineState::default()));

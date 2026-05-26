@@ -50,6 +50,15 @@ pub struct SyntaxHighlighter {
     /// Parsed injection trees.
     /// These are built once in update() and queried multiple times in match_styles().
     injection_layers: Vec<InjectionLayer>,
+    /// A tree parsed over a limited window for fast initial highlighting.
+    /// Preferred over `tree` when the query range falls within its `byte_range`.
+    /// Cleared when a full tree is applied via `apply_background_tree`.
+    windowed_tree: Option<WindowedTree>,
+    /// Incremented each time a full (non-windowed) tree is successfully applied.
+    /// `apply_windowed_tree` refuses to apply if this has changed since the
+    /// windowed parse was spawned, preventing a stale partial result from
+    /// overwriting a more-complete full tree.
+    full_tree_revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +66,14 @@ pub(crate) enum SyntaxHighlightUpdate {
     Complete,
     PendingInjections,
     TimedOut,
+}
+
+/// A syntax tree parsed over a limited byte range for fast initial highlighting
+/// while a full background parse is pending. Cleared when a complete tree is applied.
+pub(crate) struct WindowedTree {
+    /// The byte range of the document that this tree covers.
+    pub(crate) byte_range: Range<usize>,
+    pub(crate) tree: Tree,
 }
 
 /// A parsed injection layer.
@@ -397,6 +414,8 @@ impl SyntaxHighlighter {
             parser,
             tree: None,
             injection_layers: Vec::new(),
+            windowed_tree: None,
+            full_tree_revision: 0,
         })
     }
 
@@ -617,9 +636,24 @@ impl SyntaxHighlighter {
         );
 
         if timed_out || new_tree.is_none() {
-            // Restore the old tree so highlighting continues with stale data.
+            // Restore the old tree (already has edit() applied) so highlighting
+            // continues with stale but byte-shifted data.
             self.tree = Some(old_tree);
             self.text = text.clone();
+            // The windowed tree (from a previous Phase 1 parse) has NOT had
+            // edit() applied, so its byte ranges are stale relative to the new
+            // text.  Keeping it would cause match_styles to return un-shifted
+            // highlight ranges (highlights appear before their actual text).
+            // Clear it; Phase 1 will produce a fresh windowed tree shortly.
+            self.windowed_tree = None;
+            // Apply the edit to injection layer trees to keep their byte
+            // positions in sync with the shifted text.  Without this, injection
+            // highlights (e.g. asciidoc _emphasis_) appear at the pre-insertion
+            // position until Phase 2 completes.
+            for layer in &mut self.injection_layers {
+                layer.tree.edit(&edit);
+                layer.byte_range = Self::shift_byte_range(&layer.byte_range, &edit);
+            }
             return SyntaxHighlightUpdate::TimedOut;
         }
 
@@ -639,6 +673,13 @@ impl SyntaxHighlighter {
             // highlights (wrong emphasis ranges, etc.), so clear them and wait
             // for the background parse to restore correct layers.
             self.injection_layers.clear();
+            // self.tree is now a fresh sync parse (correct byte positions).
+            // The windowed_tree (from a previous Phase 1) was NOT updated with
+            // the current edit, so its byte ranges are stale.  match_styles
+            // prefers windowed_tree over self.tree when the query range fits,
+            // which would produce un-shifted highlight ranges.  Clear it;
+            // self.tree is already correct for main-language highlights.
+            self.windowed_tree = None;
             // Signal the caller to dispatch a background parse.
             SyntaxHighlightUpdate::PendingInjections
         } else {
@@ -682,10 +723,17 @@ impl SyntaxHighlighter {
     /// Compute injection layers from a freshly-parsed main tree.
     /// This is pure computation with no side effects and is safe to run on a
     /// background thread.
+    ///
+    /// `scope`: when `Some`, the QueryCursor is restricted to that byte range so
+    /// that only injection ranges within the viewport window are collected.
+    /// This makes the injection parse fast for large documents (e.g. asciidoc).
+    /// Injection highlights outside the scope will be absent until a full
+    /// (scope=None) parse completes.
     pub(crate) fn compute_injection_layers(
         data: InjectionParseData,
         tree: &Tree,
         text: &Rope,
+        scope: Option<Range<usize>>,
     ) -> Vec<InjectionLayer> {
         fn sort_ranges(ranges: &mut [tree_sitter::Range]) {
             ranges.sort_unstable_by(|a, b| {
@@ -697,6 +745,12 @@ impl SyntaxHighlighter {
 
         let root_node = tree.root_node();
         let mut cursor = QueryCursor::new();
+        // Restrict the query to the visible window when a scope is provided.
+        // For combined injections (e.g. asciidoc_inline), this avoids scanning
+        // the entire document on every keystroke.
+        if let Some(ref s) = scope {
+            cursor.set_byte_range(s.clone());
+        }
         let mut matches = cursor.matches(&data.query, root_node, TextProvider(text));
 
         let mut combined_ranges: FxHashMap<SharedString, Vec<tree_sitter::Range>> =
@@ -865,7 +919,43 @@ impl SyntaxHighlighter {
 
         self.tree = Some(tree);
         self.injection_layers = injection_layers;
+        // A complete tree supersedes any windowed result.
+        self.windowed_tree = None;
+        self.full_tree_revision += 1;
         true
+    }
+
+    /// Apply a windowed tree parsed on a background thread.
+    ///
+    /// Only accepted when:
+    /// - the text still matches, and
+    /// - no full tree has been applied since this windowed parse was spawned
+    ///   (guarded by `expected_full_tree_revision`).
+    ///
+    /// Returns `true` if the windowed tree was applied.
+    pub(crate) fn apply_windowed_tree(
+        &mut self,
+        windowed: WindowedTree,
+        text: &Rope,
+        expected_full_tree_revision: u64,
+    ) -> bool {
+        if !self.text.eq(text) {
+            return false;
+        }
+        if self.full_tree_revision != expected_full_tree_revision {
+            // A full parse finished after this windowed parse was spawned;
+            // the windowed result is now redundant.
+            return false;
+        }
+        self.windowed_tree = Some(windowed);
+        true
+    }
+
+    /// Returns the current `full_tree_revision` counter.
+    /// Callers capture this before spawning a windowed parse and pass it back
+    /// to `apply_windowed_tree` to guard against races.
+    pub(crate) fn full_tree_revision(&self) -> u64 {
+        self.full_tree_revision
     }
 
     /// Shift a byte range by a tree-sitter edit.
@@ -908,13 +998,27 @@ impl SyntaxHighlighter {
             self.injection_layers.clear();
             return;
         };
-        self.injection_layers = Self::compute_injection_layers(data, tree, &self.text.clone());
+        self.injection_layers = Self::compute_injection_layers(data, tree, &self.text.clone(), None);
     }
 
     /// Match the visible ranges of nodes in the Tree for highlighting.
     fn match_styles(&self, range: Range<usize>) -> Vec<HighlightItem> {
         let mut highlights = vec![];
-        let Some(tree) = &self.tree else {
+
+        // Prefer the windowed tree when the query range is fully inside its
+        // byte_range.  It is a freshly-parsed partial tree so it gives correct
+        // results faster than waiting for the full background parse.
+        let active_tree: &Tree = if let Some(wt) = &self.windowed_tree {
+            if wt.byte_range.start <= range.start && range.end <= wt.byte_range.end {
+                &wt.tree
+            } else if let Some(t) = &self.tree {
+                t
+            } else {
+                return highlights;
+            }
+        } else if let Some(t) = &self.tree {
+            t
+        } else {
             return highlights;
         };
 
@@ -922,7 +1026,7 @@ impl SyntaxHighlighter {
             return highlights;
         };
 
-        let root_node = tree.root_node();
+        let root_node = active_tree.root_node();
         let source = &self.text;
 
         // Query pre-parsed injection layers.
@@ -1030,45 +1134,63 @@ impl SyntaxHighlighter {
 
     /// Returns the syntax highlight styles for a range of text.
     ///
-    /// The argument `range` is the range of bytes in the text to highlight.
-    ///
-    /// Returns a vector of tuples where each tuple contains:
-    /// - A byte range relative to the text
-    /// - The corresponding highlight style for that range
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
-    /// use ropey::Rope;
-    ///
-    /// let code = "fn main() {\n    println!(\"Hello\");\n}";
-    /// let rope = Rope::from_str(code);
-    /// let mut highlighter = SyntaxHighlighter::new("rust");
-    /// highlighter.update(None, &rope, None);
-    ///
-    /// let theme = HighlightTheme::default_dark();
-    /// let range = 0..code.len();
-    /// let styles = highlighter.styles(&range, &theme);
-    /// ```
+    /// `ime_marked_range`: if `Some`, bytes in that range are excluded from
+    /// highlights.  IME composition text is syntactically meaningless and
+    /// must not be treated as e.g. emphasis delimiters.
     pub fn styles(
         &self,
         range: &Range<usize>,
         theme: &HighlightTheme,
+        ime_marked_range: Option<Range<usize>>,
     ) -> Vec<(Range<usize>, HighlightStyle)> {
         let mut styles = vec![];
         let start_offset = range.start;
 
         let highlights = self.match_styles(range.clone());
 
-        // let mut iter_count = 0;
         for item in highlights {
-            // iter_count += 1;
             let node_range = &item.range;
             let name = &item.name;
 
-            // Avoid start larger than end
-            let mut node_range = node_range.start.max(range.start)..node_range.end.min(range.end);
+            // Skip highlights that overlap the IME composition range.
+            // The composition text is syntactically meaningless; treating its
+            // bytes as delimiters produces false emphasis/strong spans.
+            if let Some(ref ime) = ime_marked_range {
+                if node_range.start < ime.end && node_range.end > ime.start {
+                    continue;
+                }
+            }
+
+            // Clip the node range to the requested range.
+            // `range.start` / `range.end` can fall inside a multi-byte character
+            // (e.g. 3-byte CJK or emoji) when the visible-byte range is
+            // computed from pixel positions.  Passing a non-char-boundary byte
+            // index to DirectWrite's layout_line causes a panic in str slicing.
+            // Walk backward from the byte until we land on a UTF-8 char boundary
+            // (i.e. a byte that is NOT a continuation byte 0x80..=0xBF).
+            let snap_to_char_boundary = |byte: usize| -> usize {
+                let mut pos = byte.min(self.text.len());
+                // Walk backward until pos points at a char boundary.
+                // A UTF-8 continuation byte has the bit pattern 10xx_xxxx.
+                // We look at the byte *at* pos (not before it).
+                while pos > 0 && pos < self.text.len() {
+                    let (chunk, chunk_start) = self.text.chunk(pos);
+                    let byte_in_chunk = pos - chunk_start;
+                    if byte_in_chunk < chunk.len()
+                        && (chunk.as_bytes()[byte_in_chunk] & 0xC0) == 0x80
+                    {
+                        pos -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                pos
+            };
+            let clipped_start =
+                snap_to_char_boundary(node_range.start.max(range.start));
+            let clipped_end =
+                snap_to_char_boundary(node_range.end.min(range.end));
+            let mut node_range = clipped_start..clipped_end;
             if node_range.start > node_range.end {
                 node_range.end = node_range.start;
             }
@@ -1077,11 +1199,31 @@ impl SyntaxHighlighter {
         }
 
         // If the matched styles is empty, return a default range.
-        if styles.len() == 0 {
+        if styles.is_empty() {
             return vec![(start_offset..range.end, HighlightStyle::default())];
         }
 
-        let styles = unique_styles(&range, styles);
+        // Snap the total range endpoints to char boundaries before passing to
+        // unique_styles, which uses them as sweep-line split points.
+        let snapped_range = {
+            let snap_to_char_boundary = |byte: usize| -> usize {
+                let mut pos = byte.min(self.text.len());
+                while pos > 0 && pos < self.text.len() {
+                    let (chunk, chunk_start) = self.text.chunk(pos);
+                    let byte_in_chunk = pos - chunk_start;
+                    if byte_in_chunk < chunk.len()
+                        && (chunk.as_bytes()[byte_in_chunk] & 0xC0) == 0x80
+                    {
+                        pos -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                pos
+            };
+            snap_to_char_boundary(range.start)..snap_to_char_boundary(range.end)
+        };
+        let styles = unique_styles(&snapped_range, styles);
 
         // NOTE: DO NOT remove this comment, it is used for debugging.
         // for style in &styles {

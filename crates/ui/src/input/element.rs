@@ -1416,10 +1416,20 @@ impl TextElement {
             } else {
                 text.line_end_offset(end_line)
             };
+            // Pass IME composition range so the highlighter can skip nodes that
+            // overlap it and avoid false emphasis/strong spans during composition.
+            let ime_marked_range = state
+                .ime_marked_range
+                .as_ref()
+                .map(|r| r.start..r.end);
             let range_styles = if skip {
                 vec![(byte_start..byte_end, HighlightStyle::default())]
             } else {
-                highlighter.styles(&(byte_start..byte_end), &cx.theme().highlight_theme)
+                highlighter.styles(
+                    &(byte_start..byte_end),
+                    &cx.theme().highlight_theme,
+                    ime_marked_range,
+                )
             };
 
             *styles = gpui::combine_highlights(styles.clone(), range_styles).collect();
