@@ -13,3 +13,8 @@
   (title_h4_marker)
   (title_h5_marker)
 ] @punctuation.special
+
+[
+  (listing_block)
+  (literal_block)
+] @text.literal.block

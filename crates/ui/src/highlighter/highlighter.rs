@@ -1615,7 +1615,7 @@ $x = 1;
         let mut highlighter = SyntaxHighlighter::new("markdown");
         highlighter.update(None, &rope, None);
 
-        let styles = highlighter.styles(&(0..markdown.len()), &HighlightTheme::default_dark());
+        let styles = highlighter.styles(&(0..markdown.len()), &HighlightTheme::default_dark(), None);
         for text in ["bold and italic", "with"] {
             let start = markdown.find(text).unwrap();
             let end = start + text.len();

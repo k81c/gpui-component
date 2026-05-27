@@ -3316,7 +3316,7 @@ ORDER BY id
                     let h = highlighter.borrow();
                     if let Some(h) = h.as_ref() {
                         let line_end = state.text.line_end_offset(comment_line);
-                        return h.styles(&(comment_start..line_end), &theme);
+                        return h.styles(&(comment_start..line_end), &theme, None);
                     }
                 }
                 vec![]
@@ -3360,7 +3360,7 @@ ORDER BY id
                     let h = highlighter.borrow();
                     if let Some(h) = h.as_ref() {
                         let line_end = state.text.line_end_offset(comment_line);
-                        return h.styles(&(comment_start..line_end), &theme);
+                        return h.styles(&(comment_start..line_end), &theme, None);
                     }
                 }
                 vec![]

@@ -14,8 +14,9 @@
 [
   (code_block)
   (raw_block)
-  (verbatim)
-] @text.literal
+] @text.literal.block
+
+(verbatim) @text.literal
 
 [
   (link_text)

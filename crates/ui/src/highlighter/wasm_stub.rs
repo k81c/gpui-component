@@ -118,6 +118,7 @@ pub struct ThemeStyle {
     pub color: Option<gpui::Hsla>,
     pub font_style: Option<FontStyle>,
     pub font_weight: Option<FontWeightContent>,
+    pub background_color: Option<gpui::Hsla>,
 }
 
 impl From<ThemeStyle> for HighlightStyle {
@@ -140,6 +141,7 @@ impl From<ThemeStyle> for HighlightStyle {
                 FontStyle::Italic => gpui::FontStyle::Italic,
                 FontStyle::Underline => gpui::FontStyle::Normal,
             }),
+            background_color: style.background_color,
             ..Default::default()
         }
     }
@@ -151,6 +153,10 @@ pub struct SyntaxColors {
     // Adding commonly accessed fields to avoid compilation errors
     #[serde(rename = "link_text")]
     pub link_text: Option<ThemeStyle>,
+    #[serde(rename = "text.literal")]
+    pub text_literal: Option<ThemeStyle>,
+    #[serde(rename = "text.literal.block")]
+    pub text_literal_block: Option<ThemeStyle>,
 }
 
 impl SyntaxColors {
