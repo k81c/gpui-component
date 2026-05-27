@@ -1008,19 +1008,36 @@ impl SyntaxHighlighter {
         // Prefer the windowed tree when the query range is fully inside its
         // byte_range.  It is a freshly-parsed partial tree so it gives correct
         // results faster than waiting for the full background parse.
-        let active_tree: &Tree = if let Some(wt) = &self.windowed_tree {
-            if wt.byte_range.start <= range.start && range.end <= wt.byte_range.end {
-                &wt.tree
+        //
+        // `boundary_margin` guards against nodes whose end byte was truncated
+        // to the window boundary by the partial parse (e.g. a djot `heading`
+        // that has no blank-line terminator within the window extends all the
+        // way to the window end).  Any highlight item whose range touches
+        // within `boundary_margin` bytes of either window edge is considered
+        // unreliable and suppressed; the full tree will correct it once Phase 2
+        // completes.
+        const WINDOW_BOUNDARY_MARGIN: usize = 512;
+        let windowed: Option<(&Tree, Range<usize>)> =
+            if let Some(wt) = &self.windowed_tree {
+                let inner_start = wt.byte_range.start.saturating_add(WINDOW_BOUNDARY_MARGIN);
+                let inner_end = wt.byte_range.end.saturating_sub(WINDOW_BOUNDARY_MARGIN);
+                if inner_start <= range.start && range.end <= inner_end {
+                    Some((&wt.tree, wt.byte_range.clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        let (active_tree, window_range_opt): (&Tree, Option<Range<usize>>) =
+            if let Some((t, wr)) = &windowed {
+                (t, Some(wr.clone()))
             } else if let Some(t) = &self.tree {
-                t
+                (t, None)
             } else {
                 return highlights;
-            }
-        } else if let Some(t) = &self.tree {
-            t
-        } else {
-            return highlights;
-        };
+            };
 
         let Some(query) = &self.query else {
             return highlights;
@@ -1102,6 +1119,23 @@ impl SyntaxHighlighter {
                     };
 
                     let node_range: Range<usize> = node.start_byte()..node.end_byte();
+
+                    // When querying a windowed tree, skip highlight items whose
+                    // range touches within `WINDOW_BOUNDARY_MARGIN` bytes of
+                    // either window edge.  Those nodes were likely truncated at
+                    // the window boundary (e.g. a djot `heading` with no
+                    // blank-line terminator inside the window), so their ranges
+                    // are unreliable and would produce false multi-line
+                    // highlights.  Phase 2 (full parse) will correct them.
+                    if let Some(ref wr) = window_range_opt {
+                        let near_start = node_range.start
+                            < wr.start.saturating_add(WINDOW_BOUNDARY_MARGIN);
+                        let near_end = node_range.end
+                            > wr.end.saturating_sub(WINDOW_BOUNDARY_MARGIN);
+                        if near_start || near_end {
+                            continue;
+                        }
+                    }
                     let highlight_name = SharedString::from(highlight_name.to_string());
 
                     // Merge near range and same highlight name
