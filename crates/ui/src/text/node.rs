@@ -595,7 +595,7 @@ impl CodeBlock {
             };
 
             highlighter.update(Some(edit), &code_rope, None);
-            highlighter.styles(&(0..code.len()), &self.highlight_theme)
+            highlighter.styles(&(0..code.len()), &self.highlight_theme, None)
         });
         *styles = Some(computed_styles.clone());
         computed_styles
