@@ -1385,7 +1385,7 @@ impl TextElement {
         _visible_top: Pixels,
         visible_byte_range: Range<usize>,
         cx: &mut App,
-    ) -> Option<Vec<(Range<usize>, HighlightStyle)>> {
+    ) -> Option<(Vec<(Range<usize>, HighlightStyle)>, Vec<(Range<usize>, Hsla)>)> {
         let state = self.state.read(cx);
         let text = &state.text;
         let is_multi_line = state.mode.is_multi_line();
@@ -1478,7 +1478,14 @@ impl TextElement {
         // Combine marker styles
         styles = gpui::combine_highlights(diagnostic_styles, styles).collect();
 
-        Some(styles)
+        let bg_segments: Vec<(Range<usize>, Hsla)> = styles
+            .iter()
+            .filter_map(|(range, style)| {
+                style.background_color.map(|color| (range.clone(), color))
+            })
+            .collect();
+
+        Some((styles, bg_segments))
     }
 }
 
@@ -1499,6 +1506,7 @@ pub(super) struct PrepaintState {
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
     document_color_paths: Vec<(Path<Pixels>, Hsla)>,
+    highlight_bg_paths: Vec<(Path<Pixels>, Hsla)>,
     hover_definition_hitbox: Option<Hitbox>,
     indent_guides_path: Option<Path<Pixels>>,
     bounds: Bounds<Pixels>,
@@ -1672,12 +1680,16 @@ impl Element for TextElement {
             .text
             .line_end_offset(visible_range.end.saturating_sub(1));
 
-        let highlight_styles = self.highlight_lines(
+        let highlight_result = self.highlight_lines(
             &visible_buffer_lines,
             visible_top,
             visible_start_offset..visible_end_offset,
             cx,
         );
+        let (highlight_styles, highlight_bg_segments) = match highlight_result {
+            Some((styles, bg)) => (Some(styles), bg),
+            None => (None, vec![]),
+        };
 
         let state = self.state.read(cx);
         let multi_line = state.mode.is_multi_line();
@@ -1790,6 +1802,9 @@ impl Element for TextElement {
 
                 runs.extend(highlight_styles.iter().map(|(range, style)| {
                     let mut run = text_style.clone().highlight(*style).to_run(range.len());
+                    // background_color is not carried through TextStyle::highlight -> to_run,
+                    // so propagate it manually here.
+                    run.background_color = style.background_color;
                     if let Some(ime_marked_range) = &state.ime_marked_range {
                         if range.start >= ime_marked_range.start
                             && range.end <= ime_marked_range.end
@@ -1799,7 +1814,6 @@ impl Element for TextElement {
                             run.underline = marked_run.underline;
                         }
                     }
-
                     run
                 }));
 
@@ -1956,6 +1970,8 @@ impl Element for TextElement {
         let hover_highlight_path = self.layout_hover_highlight(&last_layout, &mut bounds, cx);
         let document_color_paths =
             self.layout_document_colors(&document_colors, &last_layout, &bounds, cx);
+        let highlight_bg_paths =
+            self.layout_document_colors(&highlight_bg_segments, &last_layout, &bounds, cx);
 
         let state = self.state.read(cx);
         let line_numbers = if state.mode.line_number() {
@@ -2036,6 +2052,7 @@ impl Element for TextElement {
             hover_highlight_path,
             hover_definition_hitbox,
             document_color_paths,
+            highlight_bg_paths,
             indent_guides_path,
             fold_icon_layout,
             ghost_first_line,
@@ -2155,6 +2172,11 @@ impl Element for TextElement {
 
         // Paint document colors
         for (path, color) in prepaint.document_color_paths.iter() {
+            window.paint_path(path.clone(), *color);
+        }
+
+        // Paint highlight background colors (from syntax theme background_color)
+        for (path, color) in prepaint.highlight_bg_paths.iter() {
             window.paint_path(path.clone(), *color);
         }
 
