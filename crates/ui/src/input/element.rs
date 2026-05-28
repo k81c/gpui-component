@@ -724,6 +724,99 @@ impl TextElement {
         paths
     }
 
+    /// Layout highlight background segments as full-width rectangles.
+    ///
+    /// Unlike `layout_document_colors`, this produces one rect per covered line
+    /// spanning the full editor width, suitable for code-block background fills.
+    ///
+    /// The `range.end - 1` trick avoids capturing the next line when tree-sitter
+    /// includes the trailing `\n` of the closing fence in the node range
+    /// (which happens with djot `code_block` and markdown `fenced_code_block`
+    /// but not with asciidoc `listing_block`).
+    fn layout_highlight_bg_rects(
+        bg_segments: &[(Range<usize>, Hsla)],
+        last_layout: &LastLayout,
+        bounds: &Bounds<Pixels>,
+        input_origin_x: Pixels,
+    ) -> Vec<(Bounds<Pixels>, Hsla)> {
+        if bg_segments.is_empty() {
+            return vec![];
+        }
+
+        // First pass: compute the max text width for each segment across all
+        // covered visible lines, so rects can be sized to content rather than
+        // the full editor width.
+        let mut segment_max_widths: Vec<Pixels> = vec![px(0.); bg_segments.len()];
+        for (vi, (&line_start_offset, line)) in last_layout
+            .visible_line_byte_offsets
+            .iter()
+            .zip(last_layout.lines.iter())
+            .enumerate()
+        {
+            let lh = last_layout.line_metrics_for_visible_index(vi).line_height;
+            let line_len: usize = line.wrapped_lines.iter().map(|r| r.len()).sum();
+            let line_end_offset = line_start_offset + line_len;
+            let line_width = line.size(lh).width;
+
+            for (si, (range, _)) in bg_segments.iter().enumerate() {
+                // Use <= to exclude a line whose start equals range.end-1,
+                // which happens when the tree-sitter node range includes the
+                // trailing \n of the closing fence (djot code_block behaviour).
+                let effective_end = range.end.saturating_sub(1);
+                if effective_end <= line_start_offset || range.start > line_end_offset {
+                    continue;
+                }
+                if line_width > segment_max_widths[si] {
+                    segment_max_widths[si] = line_width;
+                }
+            }
+        }
+
+        // Second pass: emit one Bounds<Pixels> per covered line.
+        let mut rects = vec![];
+        let mut offset_y = last_layout.visible_top;
+
+        for (vi, (&line_start_offset, line)) in last_layout
+            .visible_line_byte_offsets
+            .iter()
+            .zip(last_layout.lines.iter())
+            .enumerate()
+        {
+            let line_metrics = last_layout.line_metrics_for_visible_index(vi);
+            let line_height = line_metrics.line_height;
+            let line_len: usize = line.wrapped_lines.iter().map(|r| r.len()).sum();
+            let line_end_offset = line_start_offset + line_len;
+
+            for (si, (range, color)) in bg_segments.iter().enumerate() {
+                let effective_end = range.end.saturating_sub(1);
+                if effective_end <= line_start_offset || range.start > line_end_offset {
+                    continue;
+                }
+
+                // Width = line_number gutter + widest text line in block + right margin.
+                // Clamped to the editor bounds so it never overflows.
+                let rect_width = (last_layout.line_number_width
+                    + segment_max_widths[si]
+                    + RIGHT_MARGIN)
+                    .min(bounds.size.width);
+                let rect = Bounds::new(
+                    point(
+                        input_origin_x,
+                        bounds.origin.y + offset_y + line_metrics.spacing_before,
+                    ),
+                    size(rect_width, line_height),
+                );
+                rects.push((rect, *color));
+                // Each segment matches at most once per line.
+                break;
+            }
+
+            offset_y += line_metrics.row_height(line.wrapped_lines.len());
+        }
+
+        rects
+    }
+
     fn layout_selections(
         &self,
         last_layout: &LastLayout,
@@ -1506,7 +1599,7 @@ pub(super) struct PrepaintState {
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
     document_color_paths: Vec<(Path<Pixels>, Hsla)>,
-    highlight_bg_paths: Vec<(Path<Pixels>, Hsla)>,
+    highlight_bg_rects: Vec<(Bounds<Pixels>, Hsla)>,
     hover_definition_hitbox: Option<Hitbox>,
     indent_guides_path: Option<Path<Pixels>>,
     bounds: Bounds<Pixels>,
@@ -1970,8 +2063,12 @@ impl Element for TextElement {
         let hover_highlight_path = self.layout_hover_highlight(&last_layout, &mut bounds, cx);
         let document_color_paths =
             self.layout_document_colors(&document_colors, &last_layout, &bounds, cx);
-        let highlight_bg_paths =
-            self.layout_document_colors(&highlight_bg_segments, &last_layout, &bounds, cx);
+        let highlight_bg_rects = Self::layout_highlight_bg_rects(
+            &highlight_bg_segments,
+            &last_layout,
+            &bounds,
+            input_bounds.origin.x,
+        );
 
         let state = self.state.read(cx);
         let line_numbers = if state.mode.line_number() {
@@ -2052,7 +2149,7 @@ impl Element for TextElement {
             hover_highlight_path,
             hover_definition_hitbox,
             document_color_paths,
-            highlight_bg_paths,
+            highlight_bg_rects,
             indent_guides_path,
             fold_icon_layout,
             ghost_first_line,
@@ -2149,6 +2246,12 @@ impl Element for TextElement {
             window.paint_path(path, cx.theme().border.opacity(0.85));
         }
 
+        // Paint highlight background colors (from syntax theme background_color)
+        // Must be painted before selections so that selection highlight takes priority.
+        for (rect, color) in prepaint.highlight_bg_rects.iter() {
+            window.paint_quad(fill(*rect, *color));
+        }
+
         // Paint selections
         if window.is_window_active() {
             let secondary_selection = cx.theme().selection.saturation(0.1);
@@ -2172,11 +2275,6 @@ impl Element for TextElement {
 
         // Paint document colors
         for (path, color) in prepaint.document_color_paths.iter() {
-            window.paint_path(path.clone(), *color);
-        }
-
-        // Paint highlight background colors (from syntax theme background_color)
-        for (path, color) in prepaint.highlight_bg_paths.iter() {
             window.paint_path(path.clone(), *color);
         }
 
