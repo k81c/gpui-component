@@ -8,6 +8,7 @@ use ropey::{ChunkCursor, LineType, Rope};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{
+    cell::RefCell,
     collections::BTreeSet,
     ops::{ControlFlow, Range},
     usize,
@@ -59,6 +60,14 @@ pub struct SyntaxHighlighter {
     /// windowed parse was spawned, preventing a stale partial result from
     /// overwriting a more-complete full tree.
     full_tree_revision: u64,
+    /// Incremented on every state change that affects highlight output
+    /// (text edit, full tree apply, windowed tree apply).
+    /// Used as the primary cache key for `match_styles_cache`.
+    highlight_revision: u64,
+    /// Single-slot cache for `match_styles()` results.
+    /// Avoids re-running tree-sitter queries on every repaint when the
+    /// document and visible range have not changed.
+    match_styles_cache: RefCell<Option<MatchStylesCacheEntry>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +188,17 @@ impl HighlightItem {
             name: name.into(),
         }
     }
+}
+
+/// Cache entry for `match_styles()` results.
+/// Keyed by `highlight_revision` and the queried byte range.
+/// The items are theme-independent so they can be reused across repaints
+/// as long as the tree and text have not changed.
+#[derive(Clone)]
+struct MatchStylesCacheEntry {
+    revision: u64,
+    range: Range<usize>,
+    items: Vec<HighlightItem>,
 }
 
 impl sum_tree::Item for HighlightItem {
@@ -416,6 +436,8 @@ impl SyntaxHighlighter {
             injection_layers: Vec::new(),
             windowed_tree: None,
             full_tree_revision: 0,
+            highlight_revision: 0,
+            match_styles_cache: RefCell::new(None),
         })
     }
 
@@ -590,6 +612,9 @@ impl SyntaxHighlighter {
         if self.text.eq(text) {
             return SyntaxHighlightUpdate::Complete;
         }
+
+        // Any text change invalidates the match_styles cache.
+        self.highlight_revision += 1;
 
         let edit = edit.unwrap_or(InputEdit {
             start_byte: 0,
@@ -922,6 +947,7 @@ impl SyntaxHighlighter {
         // A complete tree supersedes any windowed result.
         self.windowed_tree = None;
         self.full_tree_revision += 1;
+        self.highlight_revision += 1;
         true
     }
 
@@ -948,6 +974,7 @@ impl SyntaxHighlighter {
             return false;
         }
         self.windowed_tree = Some(windowed);
+        self.highlight_revision += 1;
         true
     }
 
@@ -1003,6 +1030,16 @@ impl SyntaxHighlighter {
 
     /// Match the visible ranges of nodes in the Tree for highlighting.
     fn match_styles(&self, range: Range<usize>) -> Vec<HighlightItem> {
+        // Fast path: return cached result when tree and range are unchanged.
+        {
+            let cache = self.match_styles_cache.borrow();
+            if let Some(entry) = cache.as_ref() {
+                if entry.revision == self.highlight_revision && entry.range == range {
+                    return entry.items.clone();
+                }
+            }
+        }
+
         let mut highlights = vec![];
 
         // Prefer the windowed tree when the query range is fully inside its
@@ -1162,6 +1199,13 @@ impl SyntaxHighlighter {
         // for item in highlights {
         //     println!("item: {:?}", item);
         // }
+
+        // Store result in cache before returning.
+        *self.match_styles_cache.borrow_mut() = Some(MatchStylesCacheEntry {
+            revision: self.highlight_revision,
+            range: range.clone(),
+            items: highlights.clone(),
+        });
 
         highlights
     }
