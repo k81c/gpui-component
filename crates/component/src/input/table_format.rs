@@ -78,12 +78,10 @@ fn format_pipe_table(src: &str) -> Option<String> {
             widths[column] = widths[column].max(cell.chars().count());
         }
     }
-    let mut row_iter = rows.iter();
-    let mut output = Vec::with_capacity(lines.len());
-    for (index, line) in lines.iter().enumerate() {
-        if let Some((row_index, (_, cells))) =
-            row_iter.clone().enumerate().find(|(_, (i, _))| *i == index)
-        {
+    let formatted_rows: Vec<(usize, String)> = rows
+        .iter()
+        .enumerate()
+        .map(|(row_index, (line_index, cells))| {
             let is_separator = separator_row == Some(row_index);
             let mut formatted = String::from("|");
             for column in 0..columns {
@@ -102,8 +100,16 @@ fn format_pipe_table(src: &str) -> Option<String> {
                     formatted.push_str(&format!(" {:<width$} |", cell, width = width));
                 }
             }
-            output.push(formatted);
-            row_iter.next();
+            (*line_index, formatted)
+        })
+        .collect();
+    let mut output = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        if let Some((_, formatted)) = formatted_rows
+            .iter()
+            .find(|(line_index, _)| *line_index == index)
+        {
+            output.push(formatted.clone());
         } else {
             output.push((*line).to_string());
         }
@@ -190,6 +196,13 @@ mod tests {
         let rows: Vec<_> = formatted.trim().lines().collect();
         assert_eq!(rows[0].len(), rows[1].len());
         assert_eq!(rows[1].len(), rows[2].len());
+    }
+
+    #[test]
+    fn keeps_non_table_lines_in_place() {
+        let source = "caption\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let formatted = format_table(source).unwrap();
+        assert!(formatted.starts_with("caption\n| a | b |\n"));
     }
 
     #[test]
