@@ -1,6 +1,7 @@
 mod clear_button;
 mod content_type;
 mod input;
+mod marked_editor;
 mod token;
 pub use gpui_base::input::{
     ActivateToken, InlineToken, InlineTokenClickEvent, InlineTokenContext, InlineTokenError,
@@ -14,6 +15,7 @@ mod overlay;
 pub(crate) mod popovers;
 mod search;
 mod syntax_context;
+mod table_format;
 
 pub(crate) use clear_button::*;
 pub use content_type::*;
@@ -51,6 +53,7 @@ pub use gpui_base::input::{
 pub use group::*;
 pub use input::*;
 pub use lsp_types::Position;
+pub use marked_editor::{MarkedEditor, MarkedEditorOptions, MarkedEditorState};
 pub use number_input::{NumberInput, NumberInputEvent, NumberStep, StepAction};
 pub use otp_input::*;
 pub use state::AnyInputState;

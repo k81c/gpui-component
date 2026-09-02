@@ -415,6 +415,8 @@ pub struct InputBaseState<M: InputModeKind> {
     /// is rebuilt at the top of every render, which is what keeps it current
     /// when the palette changes after the state was built.
     pub(super) editor_style: InputEditorStyle,
+    /// Optional parser-independent presentation decorator.
+    pub(super) presentation_decorator: Option<crate::input::InputPresentationDecoratorRef>,
     /// What a consumer projected, kept verbatim so that resolution never
     /// consumes its own output: resolving in place would fill the unset
     /// colours once and then never see them as unset again, which is the same
@@ -745,6 +747,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             mask_pattern: MaskPattern::default(),
             mask_pattern_set: false,
             editor_style: InputEditorStyle::default(),
+            presentation_decorator: None,
             projected_editor_style: InputEditorStyle::default(),
             diagnostic_popover: None,
             context_menu_handler: None,
@@ -837,6 +840,21 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub fn set_editor_style(&mut self, style: InputEditorStyle) {
         self.editor_style = style.clone();
         self.projected_editor_style = style;
+    }
+
+    /// Install a parser-independent presentation decorator.
+    pub fn set_presentation_decorator(
+        &mut self,
+        decorator: Option<crate::input::InputPresentationDecoratorRef>,
+        cx: &mut Context<Self>,
+    ) {
+        self.presentation_decorator = decorator;
+        cx.notify();
+    }
+
+    /// Return the currently configured presentation decorator.
+    pub fn presentation_decorator(&self) -> Option<crate::input::InputPresentationDecoratorRef> {
+        self.presentation_decorator.clone()
     }
 
     /// Set presentation padding for multi-line text and its scrollbar layout.
@@ -3702,6 +3720,28 @@ impl<M: InputModeKind> InputBaseState<M> {
             cx.emit(InputEvent::Change);
         }
         cx.notify();
+    }
+
+    /// Replace a UTF-8 byte range as one undoable edit.
+    ///
+    /// This public wrapper is intended for structured editor actions such as
+    /// table formatting. Invalid or non-character-boundary ranges are ignored.
+    pub fn replace_utf8_range(
+        &mut self,
+        range: Range<usize>,
+        new_text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if range.start > range.end
+            || range.end > self.text.len()
+            || !self.text.is_char_boundary(range.start)
+            || !self.text.is_char_boundary(range.end)
+        {
+            return;
+        }
+
+        self.replace_text_in_ranges(&[(range, new_text.to_owned())], window, cx);
     }
 
     /// Update fold candidates from tree-sitter syntax tree (full extraction).

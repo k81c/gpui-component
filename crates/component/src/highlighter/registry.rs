@@ -12,7 +12,7 @@ use anyhow::Result;
 
 use crate::{ActiveTheme, DEFAULT_THEME_COLORS, ThemeMode, highlighter::languages};
 
-pub(super) const HIGHLIGHT_NAMES: [&str; 41] = [
+pub(super) const HIGHLIGHT_NAMES: [&str; 42] = [
     "attribute",
     "boolean",
     "comment",
@@ -49,6 +49,7 @@ pub(super) const HIGHLIGHT_NAMES: [&str; 41] = [
     "tag.doctype",
     "text.code.span",
     "text.literal",
+    "text.literal.block",
     "title",
     "type",
     "variable",
@@ -162,6 +163,8 @@ pub struct SyntaxColors {
     pub text_code_span: Option<ThemeStyle>,
     #[serde(rename = "text.literal")]
     pub text_literal: Option<ThemeStyle>,
+    #[serde(rename = "text.literal.block")]
+    pub text_literal_block: Option<ThemeStyle>,
     pub title: Option<ThemeStyle>,
     #[serde(rename = "type")]
     pub type_: Option<ThemeStyle>,
@@ -224,6 +227,7 @@ pub struct ThemeStyle {
     color: Option<Hsla>,
     font_style: Option<FontStyle>,
     font_weight: Option<FontWeightContent>,
+    background_color: Option<Hsla>,
 }
 
 impl From<ThemeStyle> for HighlightStyle {
@@ -232,6 +236,7 @@ impl From<ThemeStyle> for HighlightStyle {
             color: style.color,
             font_weight: style.font_weight.map(Into::into),
             font_style: style.font_style.map(Into::into),
+            background_color: style.background_color,
             ..Default::default()
         }
     }
@@ -280,6 +285,7 @@ impl SyntaxColors {
             "tag.doctype" => self.tag_doctype,
             "text.code.span" => self.text_code_span,
             "text.literal" => self.text_literal,
+            "text.literal.block" => self.text_literal_block,
             "title" => self.title,
             "type" => self.type_,
             "variable" => self.variable,

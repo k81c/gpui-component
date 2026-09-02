@@ -6,6 +6,13 @@ use crate::highlighter::GrammarConfig;
 pub enum Language {
     Json,
     Plain,
+    #[cfg(feature = "tree-sitter-asciidoc")]
+    AsciiDoc,
+    #[cfg(any(
+        feature = "tree-sitter-asciidoc",
+        feature = "tree-sitter-asciidoc-inline"
+    ))]
+    AsciiDocInline,
     #[cfg(feature = "tree-sitter-astro")]
     Astro,
     #[cfg(feature = "tree-sitter-bash")]
@@ -22,6 +29,8 @@ pub enum Language {
     Css,
     #[cfg(feature = "tree-sitter-diff")]
     Diff,
+    #[cfg(feature = "tree-sitter-djot")]
+    Djot,
     #[cfg(feature = "tree-sitter-ejs")]
     Ejs,
     #[cfg(feature = "tree-sitter-elixir")]
@@ -95,6 +104,13 @@ impl Language {
         match self {
             Self::Json => "json",
             Self::Plain => "text",
+            #[cfg(feature = "tree-sitter-asciidoc")]
+            Self::AsciiDoc => "asciidoc",
+            #[cfg(any(
+                feature = "tree-sitter-asciidoc",
+                feature = "tree-sitter-asciidoc-inline"
+            ))]
+            Self::AsciiDocInline => "asciidoc_inline",
             #[cfg(feature = "tree-sitter-astro")]
             Self::Astro => "astro",
             #[cfg(feature = "tree-sitter-bash")]
@@ -111,6 +127,8 @@ impl Language {
             Self::Css => "css",
             #[cfg(feature = "tree-sitter-diff")]
             Self::Diff => "diff",
+            #[cfg(feature = "tree-sitter-djot")]
+            Self::Djot => "djot",
             #[cfg(feature = "tree-sitter-ejs")]
             Self::Ejs => "ejs",
             #[cfg(feature = "tree-sitter-elixir")]
@@ -181,6 +199,13 @@ impl Language {
             "json" | "jsonc" => Some(Self::Json),
             #[cfg(feature = "tree-sitter-astro")]
             "astro" => Some(Self::Astro),
+            #[cfg(feature = "tree-sitter-asciidoc")]
+            "asciidoc" | "adoc" => Some(Self::AsciiDoc),
+            #[cfg(any(
+                feature = "tree-sitter-asciidoc",
+                feature = "tree-sitter-asciidoc-inline"
+            ))]
+            "asciidoc_inline" | "asciidoc-inline" => Some(Self::AsciiDocInline),
             #[cfg(feature = "tree-sitter-bash")]
             "bash" | "sh" => Some(Self::Bash),
             #[cfg(feature = "tree-sitter-c")]
@@ -195,6 +220,8 @@ impl Language {
             "css" | "scss" => Some(Self::Css),
             #[cfg(feature = "tree-sitter-diff")]
             "diff" => Some(Self::Diff),
+            #[cfg(feature = "tree-sitter-djot")]
+            "djot" => Some(Self::Djot),
             #[cfg(feature = "tree-sitter-ejs")]
             "ejs" => Some(Self::Ejs),
             #[cfg(feature = "tree-sitter-elixir")]
@@ -260,6 +287,10 @@ impl Language {
         let mut languages: Vec<&'static str> = Vec::new();
 
         match self {
+            #[cfg(feature = "tree-sitter-asciidoc")]
+            Self::AsciiDoc => {
+                languages.push("asciidoc_inline");
+            }
             #[cfg(feature = "tree-sitter-markdown")]
             Self::Markdown => {
                 languages.push("markdown_inline");
@@ -391,6 +422,42 @@ impl Language {
                 "",
                 "",
             ),
+            #[cfg(feature = "tree-sitter-asciidoc")]
+            Self::AsciiDoc => {
+                return LanguageConfig::new(
+                    self.name(),
+                    tree_sitter_asciidoc::language(),
+                    self.injection_languages(),
+                    include_str!("languages/asciidoc/highlights.scm"),
+                    include_str!("languages/asciidoc/injections.scm"),
+                    "",
+                );
+            }
+            #[cfg(any(
+                feature = "tree-sitter-asciidoc",
+                feature = "tree-sitter-asciidoc-inline"
+            ))]
+            Self::AsciiDocInline => {
+                return LanguageConfig::new(
+                    self.name(),
+                    tree_sitter_asciidoc_inline::language(),
+                    self.injection_languages(),
+                    include_str!("languages/asciidoc_inline/highlights.scm"),
+                    "",
+                    "",
+                );
+            }
+            #[cfg(feature = "tree-sitter-djot")]
+            Self::Djot => {
+                return LanguageConfig::new(
+                    self.name(),
+                    tree_sitter_djot::language(),
+                    self.injection_languages(),
+                    include_str!("languages/djot/highlights.scm"),
+                    "",
+                    "",
+                );
+            }
             #[cfg(feature = "tree-sitter-toml")]
             Self::Toml => (
                 tree_sitter_toml_ng::LANGUAGE,
@@ -634,6 +701,13 @@ mod tests {
             assert_eq!(Language::Markdown.name(), "markdown");
         }
 
+        #[cfg(feature = "tree-sitter-asciidoc")]
+        {
+            assert_eq!(Language::AsciiDoc.name(), "asciidoc");
+            assert_eq!(Language::AsciiDocInline.name(), "asciidoc_inline");
+            assert_eq!(Language::from_name("adoc"), Some(Language::AsciiDoc));
+        }
+
         #[cfg(feature = "tree-sitter-yaml")]
         assert_eq!(Language::Yaml.name(), "yaml");
         #[cfg(feature = "tree-sitter-rust")]
@@ -677,6 +751,11 @@ mod tests {
         #[cfg(not(feature = "tree-sitter-rust"))]
         assert_eq!(Language::from_name("rs"), None);
 
+        #[cfg(feature = "tree-sitter-djot")]
+        assert_eq!(Language::from_name("djot"), Some(Language::Djot));
+        #[cfg(not(feature = "tree-sitter-djot"))]
+        assert_eq!(Language::from_name("djot"), None);
+
         #[cfg(feature = "tree-sitter-markdown")]
         assert_eq!(Language::from_name("md"), Some(Language::Markdown));
         #[cfg(not(feature = "tree-sitter-markdown"))]
@@ -688,5 +767,25 @@ mod tests {
         assert_eq!(Language::from_name("ts"), None);
 
         assert_eq!(Language::from_str("unknown"), Language::Plain);
+    }
+
+    #[test]
+    fn marked_language_queries_are_valid() {
+        #[cfg(feature = "tree-sitter-asciidoc")]
+        for language in [Language::AsciiDoc, Language::AsciiDocInline] {
+            let config = language.config();
+            let grammar = config.language.as_ref().expect("grammar");
+            tree_sitter::Query::new(grammar, &config.highlights).expect("valid highlights query");
+            if !config.injections.is_empty() {
+                tree_sitter::Query::new(grammar, &config.injections)
+                    .expect("valid injections query");
+            }
+        }
+        #[cfg(feature = "tree-sitter-djot")]
+        {
+            let config = Language::Djot.config();
+            let grammar = config.language.as_ref().expect("grammar");
+            tree_sitter::Query::new(grammar, &config.highlights).expect("valid djot query");
+        }
     }
 }

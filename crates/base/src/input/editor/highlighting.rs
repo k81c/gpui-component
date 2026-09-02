@@ -1,6 +1,6 @@
 use std::{ops::Range, rc::Rc, sync::Arc};
 
-use gpui::{AnyElement, Context, HighlightStyle, Hsla, SharedString, Window};
+use gpui::{AnyElement, Context, HighlightStyle, Hsla, Pixels, SharedString, Window};
 use ropey::Rope;
 
 use super::{EditorState, FoldRange, InputEdit};
@@ -78,6 +78,52 @@ pub trait SyntaxContextProvider {
     fn context_at(&self, text: &Rope, offset: usize) -> SyntaxContext;
 }
 
+/// Per-line layout values supplied by a presentation decorator.
+///
+/// The editor keeps text editing, selection and scrolling parser agnostic;
+/// consumers can use this small value object to vary typography without
+/// taking ownership of the editor's layout engine.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinePresentation {
+    pub font_size: Pixels,
+    pub line_height: Pixels,
+    pub spacing_before: Pixels,
+    pub spacing_after: Pixels,
+}
+
+/// A background range painted together with the corresponding text layout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundSpan {
+    pub range: Range<usize>,
+    pub color: Hsla,
+}
+
+impl Default for LinePresentation {
+    fn default() -> Self {
+        Self {
+            font_size: Pixels::ZERO,
+            line_height: Pixels::ZERO,
+            spacing_before: Pixels::ZERO,
+            spacing_after: Pixels::ZERO,
+        }
+    }
+}
+
+/// Parser-independent decoration hook for editor presentation.
+///
+/// A decorator is intentionally limited to line metrics and background spans;
+/// parsing and snapshot management remain the responsibility of the UI crate.
+pub trait InputPresentationDecorator {
+    fn line_presentation(&self, _line: usize, default: LinePresentation) -> LinePresentation {
+        default
+    }
+
+    fn background_spans(&self, _range: &Range<usize>) -> Vec<BackgroundSpan> {
+        Vec::new()
+    }
+}
+
+pub type InputPresentationDecoratorRef = Rc<dyn InputPresentationDecorator>;
 #[derive(Clone, Copy, Default)]
 pub struct DiagnosticColors {
     pub error: Hsla,

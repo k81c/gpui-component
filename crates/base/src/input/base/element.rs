@@ -1930,6 +1930,27 @@ impl<M: InputModeKind> TextElement<M> {
             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
             let mut line_has_background = false;
 
+            let line_presentation = state
+                .presentation_decorator
+                .as_ref()
+                .map(|decorator| {
+                    decorator.line_presentation(
+                        buffer_line,
+                        crate::input::LinePresentation {
+                            font_size,
+                            line_height: last_layout.line_height,
+                            spacing_before: Pixels::ZERO,
+                            spacing_after: Pixels::ZERO,
+                        },
+                    )
+                })
+                .unwrap_or(crate::input::LinePresentation {
+                    font_size,
+                    line_height: last_layout.line_height,
+                    spacing_before: Pixels::ZERO,
+                    spacing_after: Pixels::ZERO,
+                });
+
             for range in &line_item.wrapped_lines {
                 let line_runs = runs_for_range(runs, run_offset, &range);
                 let line_runs = if bg_segments.is_empty() {
@@ -1945,9 +1966,12 @@ impl<M: InputModeKind> TextElement<M> {
                 let sub_line: SharedString = line_text[range.clone()].to_string().into();
                 let line_runs =
                     align_runs_to_char_boundaries(&sub_line, &line_runs).unwrap_or(line_runs);
-                let shaped_line = window
-                    .text_system()
-                    .shape_line(sub_line, font_size, &line_runs, None);
+                let shaped_line = window.text_system().shape_line(
+                    sub_line,
+                    line_presentation.font_size,
+                    &line_runs,
+                    None,
+                );
 
                 line_has_background |= has_background(&line_runs);
                 wrapped_lines.push(shaped_line);
@@ -2469,9 +2493,17 @@ impl<M: InputModeKind> Element for TextElement<M> {
             .into_vec()
         };
 
-        let document_colors = state
+        let mut document_colors = state
             .extras
             .document_color_swatches(&text, &last_layout.visible_range);
+        if let Some(decorator) = state.presentation_decorator.as_ref() {
+            document_colors.extend(
+                decorator
+                    .background_spans(&(visible_start_offset..visible_end_offset))
+                    .into_iter()
+                    .map(|span| (span.range, span.color)),
+            );
+        }
 
         // Create shaped lines for whitespace indicators before layout
         let whitespace_indicators =

@@ -518,6 +518,41 @@ impl SyntaxHighlighter {
         &self.text
     }
 
+    /// Return the heading level for each source row when the language has a
+    /// marked-text heading syntax (Markdown, Djot or AsciiDoc).
+    pub fn heading_levels(&self) -> Vec<Option<u8>> {
+        self.text
+            .lines(ropey::LineType::LF)
+            .map(|line| {
+                let line = line.to_string();
+                let line = line.trim_start();
+                if self.language.eq_ignore_ascii_case("asciidoc")
+                    || self.language.eq_ignore_ascii_case("adoc")
+                {
+                    let level = line.chars().take_while(|ch| *ch == '=').count();
+                    (level > 0 && line.as_bytes().get(level) == Some(&b' ')).then_some(level as u8)
+                } else if self.language.eq_ignore_ascii_case("markdown")
+                    || self.language.eq_ignore_ascii_case("md")
+                    || self.language.eq_ignore_ascii_case("djot")
+                {
+                    let level = line.chars().take_while(|ch| *ch == '#').count();
+                    (level > 0 && line.as_bytes().get(level) == Some(&b' ')).then_some(level as u8)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Return only heading rows intersecting the requested row range.
+    pub fn heading_levels_in_rows(&self, rows: Range<usize>) -> Vec<(usize, u8)> {
+        self.heading_levels()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(row, level)| rows.contains(&row).then_some((row, level?)))
+            .collect()
+    }
+
     /// Highlight the given text, returning a map from byte ranges to highlight captures.
     ///
     /// Uses incremental parsing by `edit` to efficiently update the highlighter's state.

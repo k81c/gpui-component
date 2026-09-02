@@ -1,0 +1,374 @@
+//! Structured editor facade for Markdown, Djot and AsciiDoc documents.
+//!
+//! `MarkedEditorState` deliberately owns an ordinary [`EditorState`].  Syntax
+//! parsing, selection, folding and undo therefore continue to use the upstream
+//! editor implementation while this facade adds document-aware actions.
+
+use std::{cell::RefCell, ops::Range, rc::Rc};
+
+use gpui::{
+    App, AppContext as _, Entity, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    StyleRefinement, Styled, Subscription, Window, div, hsla, px,
+};
+
+use crate::Sizable;
+use crate::button::{Button, ButtonVariants as _};
+use crate::{IconName, StyledExt as _};
+
+use super::table_format;
+use super::{Editor, EditorState};
+use gpui_base::input::{BackgroundSpan, InputPresentationDecorator, LinePresentation};
+
+/// Options controlling a [`MarkedEditorState`].
+#[derive(Clone, Debug)]
+pub struct MarkedEditorOptions {
+    pub language: SharedString,
+    pub readonly: bool,
+    pub table_actions: bool,
+}
+
+impl Default for MarkedEditorOptions {
+    fn default() -> Self {
+        Self {
+            language: "markdown".into(),
+            readonly: false,
+            table_actions: true,
+        }
+    }
+}
+
+/// State for a document-aware editor.
+pub struct MarkedEditorState {
+    editor: Entity<EditorState>,
+    options: MarkedEditorOptions,
+    presentation: Rc<RefCell<MarkedPresentation>>,
+    _subscription: Subscription,
+}
+
+impl MarkedEditorState {
+    /// Convenience constructor for the common language-only case.
+    pub fn with_language(
+        language: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Self {
+        Self::new(
+            MarkedEditorOptions {
+                language: language.into(),
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+    }
+
+    /// Create a marked editor and install the shared Tree-sitter highlighter.
+    pub fn new(
+        options: MarkedEditorOptions,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Self {
+        let language = options.language.clone();
+        let readonly = options.readonly;
+        let presentation = Rc::new(RefCell::new(MarkedPresentation::default()));
+        let presentation_for_editor = presentation.clone();
+        let editor = cx.new(|cx| {
+            let mut state = EditorState::new(window, cx)
+                .language(language.clone())
+                .default_value("");
+            state.ensure_highlighter_factory(crate::highlighter::input_highlighter_factory());
+            state.set_readonly(readonly, cx);
+            let decorator: Rc<dyn InputPresentationDecorator> =
+                Rc::new(MarkedDecorator(presentation_for_editor));
+            state.set_presentation_decorator(Some(decorator), cx);
+            state
+        });
+        let subscription = cx.observe(&editor, |state, editor, cx| {
+            let value = editor.read(cx).value();
+            state
+                .presentation
+                .borrow_mut()
+                .rebuild(&value, state.options.language.as_ref());
+            cx.notify();
+        });
+        Self {
+            editor,
+            options,
+            presentation,
+            _subscription: subscription,
+        }
+    }
+
+    pub fn editor(&self) -> &Entity<EditorState> {
+        &self.editor
+    }
+
+    pub fn options(&self) -> &MarkedEditorOptions {
+        &self.options
+    }
+
+    pub fn set_value(
+        &mut self,
+        value: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let value = value.into();
+        self.presentation
+            .borrow_mut()
+            .rebuild(&value, self.options.language.as_ref());
+        self.editor.update(cx, |editor, cx| {
+            editor.set_value(value, window, cx);
+        });
+    }
+
+    /// Format the table containing `range` as one undoable UTF-8 edit.
+    pub fn format_table_at(
+        &mut self,
+        range: Range<usize>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let source = self.editor.read(cx).text().slice(range.clone()).to_string();
+        let Some(formatted) = table_format::format_table(&source) else {
+            return false;
+        };
+        if formatted == source {
+            return false;
+        }
+        self.editor.update(cx, |editor, cx| {
+            editor.replace_utf8_range(range, &formatted, window, cx);
+        });
+        true
+    }
+
+    pub fn table_ranges(&self, cx: &App) -> Vec<Range<usize>> {
+        let text = self.editor.read(cx).text().to_string();
+        find_table_ranges(&text)
+    }
+}
+
+#[derive(Default)]
+struct MarkedPresentation {
+    headings: Vec<Option<u8>>,
+    backgrounds: Vec<Range<usize>>,
+}
+
+impl MarkedPresentation {
+    fn rebuild(&mut self, text: &str, language: &str) {
+        self.headings.clear();
+        self.backgrounds.clear();
+        let mut offset = 0;
+        let mut in_fence = false;
+        let mut fence_start = None;
+        for line in text.split_inclusive('\n') {
+            let trimmed = line.trim_start();
+            let level = if language.eq_ignore_ascii_case("asciidoc")
+                || language.eq_ignore_ascii_case("adoc")
+            {
+                let count = trimmed.chars().take_while(|c| *c == '=').count();
+                (count > 0 && trimmed.as_bytes().get(count) == Some(&b' ')).then_some(count as u8)
+            } else {
+                let count = trimmed.chars().take_while(|c| *c == '#').count();
+                (count > 0 && trimmed.as_bytes().get(count) == Some(&b' ')).then_some(count as u8)
+            };
+            self.headings.push(level);
+            let fence =
+                trimmed.starts_with("```") || trimmed.starts_with("~~~") || trimmed == "----";
+            if fence {
+                if in_fence {
+                    if let Some(start) = fence_start.take() {
+                        self.backgrounds.push(start..offset + line.len());
+                    }
+                    in_fence = false;
+                } else {
+                    in_fence = true;
+                    fence_start = Some(offset);
+                }
+            } else if in_fence && fence_start.is_none() {
+                fence_start = Some(offset);
+            }
+            offset += line.len();
+        }
+        if let Some(start) = fence_start {
+            self.backgrounds.push(start..text.len());
+        }
+    }
+}
+
+struct MarkedDecorator(Rc<RefCell<MarkedPresentation>>);
+
+impl InputPresentationDecorator for MarkedDecorator {
+    fn line_presentation(&self, line: usize, mut default: LinePresentation) -> LinePresentation {
+        let level = self.0.borrow().headings.get(line).copied().flatten();
+        if let Some(level) = level {
+            let scale = match level {
+                1 => 1.8,
+                2 => 1.55,
+                3 => 1.35,
+                4 => 1.2,
+                _ => 1.1,
+            };
+            default.font_size *= scale;
+            default.line_height = (default.line_height * scale).max(default.line_height * 1.15);
+        }
+        default
+    }
+
+    fn background_spans(&self, range: &Range<usize>) -> Vec<BackgroundSpan> {
+        let color = hsla(0.7, 0.15, 0.35, 0.18);
+        self.0
+            .borrow()
+            .backgrounds
+            .iter()
+            .filter_map(|background| {
+                let start = background.start.max(range.start);
+                let end = background.end.min(range.end);
+                (start < end).then(|| BackgroundSpan {
+                    range: start..end,
+                    color,
+                })
+            })
+            .collect()
+    }
+}
+
+/// A styled marked editor with optional table-format actions.
+#[derive(IntoElement)]
+pub struct MarkedEditor {
+    state: Entity<MarkedEditorState>,
+    style: StyleRefinement,
+}
+
+impl MarkedEditor {
+    pub fn new(state: &Entity<MarkedEditorState>) -> Self {
+        Self {
+            state: state.clone(),
+            style: StyleRefinement::default(),
+        }
+    }
+}
+
+impl Styled for MarkedEditor {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
+    }
+}
+
+impl RenderOnce for MarkedEditor {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = self.state.read(cx);
+        let editor = state.editor.clone();
+        let options = state.options.clone();
+        let ranges = if options.table_actions && !options.readonly {
+            state.table_ranges(cx)
+        } else {
+            Vec::new()
+        };
+        let marked_state = self.state.clone();
+
+        let mut root = div()
+            .relative()
+            .size_full()
+            .child(Editor::new(&editor).readonly(options.readonly));
+        for (index, range) in ranges.into_iter().enumerate() {
+            let Some(bounds) = editor.read(cx).range_to_bounds(&range) else {
+                continue;
+            };
+            let action_state = marked_state.clone();
+            let action_range = range.clone();
+            let button = Button::new(format!("marked-editor-table-{index}"))
+                .icon(IconName::Check)
+                .label("Format")
+                .small()
+                .ghost()
+                .on_click(move |_, window, cx| {
+                    action_state.update(cx, |state, cx| {
+                        state.format_table_at(action_range.clone(), window, cx);
+                    });
+                });
+            root = root.child(
+                div()
+                    .absolute()
+                    .right(px(4.))
+                    .top(bounds.origin.y.max(px(0.)))
+                    .child(button),
+            );
+        }
+        root.refine_style(&self.style)
+    }
+}
+
+fn find_table_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    let mut pipe_start = None;
+    let mut ascii_start = None;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed == "|===" {
+            if let Some(start) = ascii_start.take() {
+                let range = start..offset + line.len();
+                if table_format::format_table(&text[range.clone()]).is_some() {
+                    ranges.push(range);
+                }
+            } else {
+                ascii_start = Some(offset);
+            }
+        }
+        if ascii_start.is_none() && trimmed.starts_with('|') && trimmed != "|===" {
+            pipe_start.get_or_insert(offset);
+        } else if let Some(start) = pipe_start.take() {
+            let range = start..offset;
+            if table_format::format_table(&text[range.clone()]).is_some() {
+                ranges.push(range);
+            }
+        }
+        offset += line.len();
+    }
+    if let Some(start) = pipe_start {
+        let range = start..text.len();
+        if table_format::format_table(&text[range.clone()]).is_some() {
+            ranges.push(range);
+        }
+    }
+    ranges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MarkedPresentation, find_table_ranges};
+    use gpui::px;
+    use gpui_base::input::{InputPresentationDecorator, LinePresentation};
+
+    #[test]
+    fn marked_presentation_extracts_headings_and_fences() {
+        let mut presentation = MarkedPresentation::default();
+        presentation.rebuild("# Title\nbody\n```\ncode\n```\n", "markdown");
+        assert_eq!(presentation.headings[0], Some(1));
+        assert_eq!(presentation.headings[1], None);
+        assert_eq!(presentation.backgrounds.len(), 1);
+        let decorator =
+            super::MarkedDecorator(std::rc::Rc::new(std::cell::RefCell::new(presentation)));
+        let line = decorator.line_presentation(
+            0,
+            LinePresentation {
+                font_size: px(10.),
+                line_height: px(15.),
+                spacing_before: px(0.),
+                spacing_after: px(0.),
+            },
+        );
+        assert!(line.font_size > px(10.));
+    }
+
+    #[test]
+    fn table_ranges_exclude_invalid_pipe_runs() {
+        assert!(find_table_ranges("| one line only\ntext\n").is_empty());
+        assert_eq!(
+            find_table_ranges("| a | b |\n|---|---|\n| 1 | 2 |\n").len(),
+            1
+        );
+        assert_eq!(find_table_ranges("|===\n| a | b\n| 1 | 2\n|===\n").len(), 1);
+    }
+}

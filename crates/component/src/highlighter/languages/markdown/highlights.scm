@@ -13,11 +13,12 @@
   (setext_h2_underline)
 ] @punctuation.special
 
+(link_title) @text.literal
+
 [
-  (link_title)
   (indented_code_block)
   (fenced_code_block)
-] @text.literal
+] @text.literal.block
 
 [
   (fenced_code_block_delimiter)
