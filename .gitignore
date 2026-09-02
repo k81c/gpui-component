@@ -33,3 +33,13 @@ crates/story-web/www/bun.lockb
 crates/base/examples/wasm/www/dist/
 .worktrees
 __pycache__/
+
+# CocoIndex Code (ccc)
+/.cocoindex_code/
+utils/.gitkeep
+rules/.gitkeep
+rule-tests/.gitkeep
+sgconfig.yml
+.agents/ast_index.md
+.kilo/kilo.jsonc
+localonly/
