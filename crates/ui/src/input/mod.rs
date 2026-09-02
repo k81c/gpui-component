@@ -20,6 +20,7 @@ mod rope_ext;
 mod search;
 mod selection;
 mod state;
+mod table_format;
 
 pub(crate) use clear_button::*;
 pub use cursor::*;

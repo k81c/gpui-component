@@ -838,6 +838,124 @@ impl TextElement {
         rects
     }
 
+    /// Layout format buttons for pipe tables detected in the visible range.
+    ///
+    /// Returns a list of (table_byte_range, prepainted_button) pairs.
+    /// The button is positioned at the top-right corner of the last visible
+    /// line of each table block.
+    fn layout_table_format_buttons(
+        &self,
+        last_layout: &LastLayout,
+        bounds: &Bounds<Pixels>,
+        input_origin_x: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<(Range<usize>, gpui::AnyElement)> {
+        // Collect table ranges first, then drop all borrows before prepaint.
+        let table_ranges: Vec<Range<usize>> = {
+            let state = self.state.read(cx);
+
+            if !state.mode.is_marked_editor() {
+                return vec![];
+            }
+
+            let Some(highlighter_rc) = state.mode.highlighter() else {
+                return vec![];
+            };
+            let highlighter = highlighter_rc.borrow();
+            let Some(h) = highlighter.as_ref() else {
+                return vec![];
+            };
+            let Some(tree) = h.tree() else {
+                return vec![];
+            };
+
+            let vis = &last_layout.visible_range_offset;
+            let mut ranges = Vec::new();
+            let root = tree.root_node();
+            let mut stack = vec![root];
+            while let Some(node) = stack.pop() {
+                if matches!(node.kind(), "pipe_table" | "table" | "table_block") {
+                    let range = node.start_byte()..node.end_byte();
+                    if range.start < vis.end && range.end > vis.start {
+                        ranges.push(range);
+                    }
+                } else {
+                    for i in (0..node.child_count()).rev() {
+                        if let Some(child) = node.child(i as u32) {
+                            stack.push(child);
+                        }
+                    }
+                }
+            }
+            ranges
+            // `highlighter`, `h`, `tree`, `state` all dropped here
+        };
+
+        if table_ranges.is_empty() {
+            return vec![];
+        }
+
+        const BTN_W: Pixels = px(60.);
+        const BTN_H: Pixels = px(18.);
+        const BTN_MARGIN: Pixels = px(4.);
+
+        let mut result = Vec::new();
+
+        for (btn_idx, table_range) in table_ranges.into_iter().enumerate() {
+            let mut last_line_top: Option<Pixels> = None;
+            let mut offset_y = last_layout.visible_top;
+
+            for (vi, (&line_start, line)) in last_layout
+                .visible_line_byte_offsets
+                .iter()
+                .zip(last_layout.lines.iter())
+                .enumerate()
+            {
+                let line_metrics = last_layout.line_metrics_for_visible_index(vi);
+                let line_len: usize = line.wrapped_lines.iter().map(|r| r.len()).sum();
+                let line_end = line_start + line_len;
+                let effective_end = table_range.end.saturating_sub(1);
+
+                if effective_end > line_start && table_range.start <= line_end {
+                    last_line_top = Some(
+                        bounds.origin.y + offset_y + line_metrics.spacing_before,
+                    );
+                }
+                offset_y += line_metrics.row_height(line.wrapped_lines.len());
+            }
+
+            let Some(top) = last_line_top else { continue };
+
+            let btn_origin = point(
+                input_origin_x + bounds.size.width - BTN_W - BTN_MARGIN,
+                top + BTN_MARGIN,
+            );
+
+            let mut btn = Button::new(("fmt-table", btn_idx))
+                .ghost()
+                .label("Align")
+                .xsmall()
+                .rounded_xs()
+                .on_mouse_down(MouseButton::Left, {
+                    let state_entity = self.state.clone();
+                    let range = table_range.clone();
+                    move |_, window: &mut Window, cx: &mut App| {
+                        cx.stop_propagation();
+                        state_entity.update(cx, |state, cx| {
+                            state.format_table_at(range.clone(), window, cx);
+                        });
+                    }
+                })
+                .into_any_element();
+
+            btn.prepaint_as_root(btn_origin, size(BTN_W, BTN_H).into(), window, cx);
+            result.push((table_range, btn));
+        }
+
+        result
+    }
+
     fn layout_selections(
         &self,
         last_layout: &LastLayout,
@@ -1627,6 +1745,8 @@ pub(super) struct PrepaintState {
     bounds: Bounds<Pixels>,
     /// Fold icon layout data
     fold_icon_layout: FoldIconLayout,
+    /// Table format button overlays: (byte_range, prepainted button)
+    table_format_buttons: Vec<(Range<usize>, gpui::AnyElement)>,
     // Inline completion rendering data
     /// Shaped ghost lines to paint after cursor row (completion lines 2+)
     ghost_lines: Vec<ShapedLine>,
@@ -2157,6 +2277,13 @@ impl Element for TextElement {
             )));
         let fold_icon_layout =
             self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
+        let table_format_buttons = self.layout_table_format_buttons(
+            &last_layout,
+            &bounds,
+            input_bounds.origin.x,
+            window,
+            cx,
+        );
 
         PrepaintState {
             bounds,
@@ -2174,6 +2301,7 @@ impl Element for TextElement {
             highlight_bg_rects,
             indent_guides_path,
             fold_icon_layout,
+            table_format_buttons,
             ghost_first_line,
             ghost_lines,
             ghost_lines_height,
@@ -2463,6 +2591,11 @@ impl Element for TextElement {
             window,
             cx,
         );
+
+        // Paint table format overlay buttons
+        for (_, btn) in prepaint.table_format_buttons.iter_mut() {
+            btn.paint(window, cx);
+        }
 
         self.state.update(cx, |state, cx| {
             state.last_layout = Some(prepaint.last_layout.clone());

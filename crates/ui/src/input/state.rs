@@ -2404,6 +2404,28 @@ impl InputState {
         self.silent_replace_text = false;
     }
 
+    /// Format the pipe table whose byte range is `table_range` in-place.
+    ///
+    /// The replacement is pushed onto the undo stack so it can be reverted.
+    /// Returns `true` when the text was actually changed.
+    pub fn format_table_at(
+        &mut self,
+        table_range: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let src = self.text.slice(table_range.clone()).to_string();
+        let Some(formatted) = crate::input::table_format::format_table(&src) else {
+            return false;
+        };
+        if formatted == src {
+            return false;
+        }
+        let range_utf16 = self.range_to_utf16(&table_range);
+        self.replace_text_in_range(Some(range_utf16), &formatted, window, cx);
+        true
+    }
+
     /// Update fold candidates from tree-sitter syntax tree (full extraction).
     /// Used only on initial load or language changes.
     fn update_fold_candidates(&mut self) {
