@@ -9,6 +9,7 @@ use ropey::{ChunkCursor, Rope};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{
+    cell::RefCell,
     collections::{BTreeSet, HashMap},
     ops::{ControlFlow, Range},
     usize,
@@ -55,6 +56,42 @@ pub struct SyntaxHighlighter {
     /// Parsed injection trees.
     /// These are built once in update() and queried multiple times in match_styles().
     injection_layers: Vec<InjectionLayer>,
+    /// A partial main tree used while a full parse of a large document is pending.
+    windowed_tree: Option<WindowedTree>,
+    /// Guards a partial result from replacing a newer complete parse.
+    full_tree_revision: u64,
+    /// Changes whenever text or either active tree changes.
+    highlight_revision: u64,
+    /// Theme-independent result for the most recently requested byte range.
+    match_styles_cache: RefCell<Option<MatchStylesCacheEntry>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyntaxHighlightUpdate {
+    Complete,
+    PendingInjections,
+    TimedOut,
+}
+
+pub(crate) struct WindowedTree {
+    pub(crate) byte_range: Range<usize>,
+    pub(crate) tree: Tree,
+}
+
+#[derive(Clone)]
+struct MatchStylesCacheEntry {
+    revision: u64,
+    range: Range<usize>,
+    items: Vec<HighlightItem>,
+}
+
+/// Structural data consumed by `MarkedEditor` from the same parse that
+/// produces syntax highlighting and folds.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MarkedSyntaxSnapshot {
+    pub(crate) heading_levels: Vec<Option<u8>>,
+    pub(crate) table_ranges: Vec<Range<usize>>,
+    pub(crate) code_block_ranges: Vec<Range<usize>>,
 }
 
 /// A parsed injection layer.
@@ -364,6 +401,10 @@ impl SyntaxHighlighter {
             parser: Parser::new(),
             tree: None,
             injection_layers: Vec::new(),
+            windowed_tree: None,
+            full_tree_revision: 0,
+            highlight_revision: 0,
+            match_styles_cache: RefCell::new(None),
         }
     }
 
@@ -487,6 +528,10 @@ impl SyntaxHighlighter {
             parser,
             tree: None,
             injection_layers: Vec::new(),
+            windowed_tree: None,
+            full_tree_revision: 0,
+            highlight_revision: 0,
+            match_styles_cache: RefCell::new(None),
         })
     }
 
@@ -506,6 +551,9 @@ impl SyntaxHighlighter {
             tree.edit(&edit);
         }
         self.text = text.clone();
+        self.windowed_tree = None;
+        self.injection_layers.clear();
+        self.highlight_revision += 1;
     }
 
     /// Returns the language name for this highlighter.
@@ -518,30 +566,58 @@ impl SyntaxHighlighter {
         &self.text
     }
 
+    /// Return structural marked-text data from the current parsed tree.
+    pub(crate) fn marked_syntax_snapshot(&self) -> MarkedSyntaxSnapshot {
+        let mut snapshot = MarkedSyntaxSnapshot {
+            heading_levels: vec![None; self.text.len_lines(ropey::LineType::LF)],
+            ..Default::default()
+        };
+        let Some(tree) = self.tree.as_ref() else {
+            return snapshot;
+        };
+
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            let mut cursor = node.walk();
+            stack.extend(node.children(&mut cursor));
+
+            if let Some(level) = Self::detect_heading_level(&self.language, &self.text, &node) {
+                let row = node.start_position().row;
+                if row < snapshot.heading_levels.len() {
+                    snapshot.heading_levels[row] = Some(level);
+                }
+            }
+
+            match node.kind() {
+                "pipe_table" | "table" | "table_block" => {
+                    snapshot
+                        .table_ranges
+                        .push(node.start_byte()..node.end_byte());
+                }
+                "indented_code_block"
+                | "fenced_code_block"
+                | "code_block"
+                | "raw_block"
+                | "listing_block"
+                | "literal_block" => {
+                    snapshot
+                        .code_block_ranges
+                        .push(node.start_byte()..node.end_byte());
+                }
+                _ => {}
+            }
+        }
+        snapshot.table_ranges.sort_by_key(|range| range.start);
+        snapshot.table_ranges.dedup();
+        snapshot.code_block_ranges.sort_by_key(|range| range.start);
+        snapshot.code_block_ranges.dedup();
+        snapshot
+    }
+
     /// Return the heading level for each source row when the language has a
     /// marked-text heading syntax (Markdown, Djot or AsciiDoc).
     pub fn heading_levels(&self) -> Vec<Option<u8>> {
-        self.text
-            .lines(ropey::LineType::LF)
-            .map(|line| {
-                let line = line.to_string();
-                let line = line.trim_start();
-                if self.language.eq_ignore_ascii_case("asciidoc")
-                    || self.language.eq_ignore_ascii_case("adoc")
-                {
-                    let level = line.chars().take_while(|ch| *ch == '=').count();
-                    (level > 0 && line.as_bytes().get(level) == Some(&b' ')).then_some(level as u8)
-                } else if self.language.eq_ignore_ascii_case("markdown")
-                    || self.language.eq_ignore_ascii_case("md")
-                    || self.language.eq_ignore_ascii_case("djot")
-                {
-                    let level = line.chars().take_while(|ch| *ch == '#').count();
-                    (level > 0 && line.as_bytes().get(level) == Some(&b' ')).then_some(level as u8)
-                } else {
-                    None
-                }
-            })
-            .collect()
+        self.marked_syntax_snapshot().heading_levels
     }
 
     /// Return only heading rows intersecting the requested row range.
@@ -553,6 +629,59 @@ impl SyntaxHighlighter {
             .collect()
     }
 
+    fn detect_heading_level(lang: &str, text: &Rope, node: &tree_sitter::Node) -> Option<u8> {
+        let kind = node.kind();
+        let source = text.slice(node.start_byte()..node.end_byte()).to_string();
+        let first_line = source.lines().next().unwrap_or_default().trim_start();
+
+        match lang {
+            "markdown" => {
+                if kind == "atx_heading" {
+                    return Self::count_heading_marker_prefix(first_line, '#');
+                }
+                if kind == "setext_heading" {
+                    let marker = source.lines().nth(1).unwrap_or_default().trim();
+                    if marker.starts_with('=') {
+                        return Some(1);
+                    }
+                    if marker.starts_with('-') {
+                        return Some(2);
+                    }
+                }
+            }
+            "asciidoc" => {
+                return match kind {
+                    "document_title" => Some(1),
+                    "title1" => Some(2),
+                    "title2" => Some(3),
+                    "title3" => Some(4),
+                    "title4" => Some(5),
+                    "title5" => Some(6),
+                    _ => None,
+                };
+            }
+            "djot" if kind.contains("heading") || kind == "section" => {
+                return Self::count_heading_marker_prefix(first_line, '#');
+            }
+            _ => {}
+        }
+
+        if kind.contains("heading") {
+            Self::count_heading_marker_prefix(first_line, '#')
+                .or_else(|| Self::count_heading_marker_prefix(first_line, '='))
+        } else {
+            None
+        }
+    }
+
+    fn count_heading_marker_prefix(line: &str, marker: char) -> Option<u8> {
+        let count = line.chars().take_while(|ch| *ch == marker).count();
+        if !(1..=6).contains(&count) {
+            return None;
+        }
+        matches!(line.chars().nth(count), Some(' ' | '\t') | None).then_some(count as u8)
+    }
+
     /// Highlight the given text, returning a map from byte ranges to highlight captures.
     ///
     /// Uses incremental parsing by `edit` to efficiently update the highlighter's state.
@@ -561,20 +690,21 @@ impl SyntaxHighlighter {
     /// still works with stale data, but `self.text` is updated so that the
     /// caller can send the current text to a background parse.
     /// When `timeout` is `None`, parsing runs to completion and always returns `true`.
-    pub fn update(
+    pub(crate) fn update_with_status(
         &mut self,
         edit: Option<InputEdit>,
         text: &Rope,
         timeout: Option<Duration>,
-    ) -> bool {
+    ) -> SyntaxHighlightUpdate {
         if self.text.eq(text) {
-            return true;
+            return SyntaxHighlightUpdate::Complete;
         }
+        self.highlight_revision += 1;
 
         // If there's no grammar for the language, just update the text.
         if self.parser.language().is_none() {
             self.text = text.clone();
-            return true;
+            return SyntaxHighlightUpdate::Complete;
         }
 
         let edit = edit.unwrap_or(InputEdit {
@@ -625,14 +755,34 @@ impl SyntaxHighlighter {
             // Restore the old tree so highlighting continues with stale data.
             self.tree = Some(old_tree);
             self.text = text.clone();
-            return false;
+            self.windowed_tree = None;
+            self.injection_layers.clear();
+            return SyntaxHighlightUpdate::TimedOut;
         }
 
         let new_tree = new_tree.unwrap();
         self.tree = Some(new_tree.clone());
         self.text = text.clone();
-        self.parse_injection_layers(&new_tree);
-        true
+        self.windowed_tree = None;
+        if timeout.is_some() && self.injections_query.is_some() {
+            self.injection_layers.clear();
+            SyntaxHighlightUpdate::PendingInjections
+        } else {
+            self.parse_injection_layers(&new_tree);
+            SyntaxHighlightUpdate::Complete
+        }
+    }
+
+    pub fn update(
+        &mut self,
+        edit: Option<InputEdit>,
+        text: &Rope,
+        timeout: Option<Duration>,
+    ) -> bool {
+        matches!(
+            self.update_with_status(edit, text, timeout),
+            SyntaxHighlightUpdate::Complete
+        )
     }
 
     /// Returns the data needed to compute injection layers on a background thread.
@@ -936,14 +1086,36 @@ impl SyntaxHighlighter {
         tree: Tree,
         text: &Rope,
         injection_layers: Vec<InjectionLayer>,
-    ) {
+    ) -> bool {
         // Only apply if the text still matches what was parsed.
         if !self.text.eq(text) {
-            return;
+            return false;
         }
 
         self.tree = Some(tree);
         self.injection_layers = injection_layers;
+        self.windowed_tree = None;
+        self.full_tree_revision += 1;
+        self.highlight_revision += 1;
+        true
+    }
+
+    pub(crate) fn apply_windowed_tree(
+        &mut self,
+        windowed_tree: WindowedTree,
+        text: &Rope,
+        expected_full_tree_revision: u64,
+    ) -> bool {
+        if !self.text.eq(text) || self.full_tree_revision != expected_full_tree_revision {
+            return false;
+        }
+        self.windowed_tree = Some(windowed_tree);
+        self.highlight_revision += 1;
+        true
+    }
+
+    pub(crate) fn full_tree_revision(&self) -> u64 {
+        self.full_tree_revision
     }
 
     /// Parse injection layers after the main tree is updated.
@@ -958,9 +1130,27 @@ impl SyntaxHighlighter {
 
     /// Match the visible ranges of nodes in the Tree for highlighting.
     fn match_styles(&self, range: Range<usize>) -> Vec<HighlightItem> {
+        if let Some(cache) = self.match_styles_cache.borrow().as_ref()
+            && cache.revision == self.highlight_revision
+            && cache.range == range
+        {
+            return cache.items.clone();
+        }
         let mut highlights = vec![];
         let mut injection_highlights = vec![];
-        let Some(tree) = &self.tree else {
+        const WINDOW_BOUNDARY_MARGIN: usize = 512;
+        let windowed_tree = self.windowed_tree.as_ref().and_then(|windowed| {
+            let start = windowed
+                .byte_range
+                .start
+                .saturating_add(WINDOW_BOUNDARY_MARGIN);
+            let end = windowed
+                .byte_range
+                .end
+                .saturating_sub(WINDOW_BOUNDARY_MARGIN);
+            (start <= range.start && range.end <= end).then_some(&windowed.tree)
+        });
+        let Some(tree) = windowed_tree.or(self.tree.as_ref()) else {
             return highlights;
         };
 
@@ -1065,6 +1255,12 @@ impl SyntaxHighlighter {
         // for item in highlights {
         //     println!("item: {:?}", item);
         // }
+
+        *self.match_styles_cache.borrow_mut() = Some(MatchStylesCacheEntry {
+            revision: self.highlight_revision,
+            range,
+            items: highlights.clone(),
+        });
 
         highlights
     }
@@ -1327,6 +1523,26 @@ mod tests {
                 "style range {range:?} is not on char boundaries of the current text"
             );
         }
+    }
+
+    #[cfg(feature = "tree-sitter-markdown")]
+    #[test]
+    fn marked_snapshot_uses_structure_not_code_block_text() {
+        let markdown = "# Visible\n\n```text\n# Not a heading\n| not | a table |\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let rope = Rope::from(markdown);
+        let mut highlighter = SyntaxHighlighter::new("markdown");
+
+        assert!(highlighter.update(None, &rope, None));
+        let snapshot = highlighter.marked_syntax_snapshot();
+
+        assert_eq!(snapshot.heading_levels[0], Some(1));
+        assert_eq!(snapshot.heading_levels[3], None);
+        assert_eq!(snapshot.code_block_ranges.len(), 1);
+        assert_eq!(snapshot.table_ranges.len(), 1);
+        assert_eq!(
+            &markdown[snapshot.table_ranges[0].clone()],
+            "| a | b |\n|---|---|\n| 1 | 2 |\n"
+        );
     }
 
     #[cfg(feature = "tree-sitter-languages")]

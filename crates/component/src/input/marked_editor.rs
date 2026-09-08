@@ -12,6 +12,7 @@ use gpui::{
 };
 
 use crate::button::{Button, ButtonVariants as _};
+use crate::highlighter::MarkedSyntaxSnapshot;
 use crate::{ActiveTheme as _, Sizable};
 use crate::{IconName, StyledExt as _};
 
@@ -87,10 +88,14 @@ impl MarkedEditorState {
         });
         let subscription = cx.observe(&editor, |state, editor, cx| {
             let value = editor.read(cx).value();
-            state
-                .presentation
-                .borrow_mut()
-                .rebuild(&value, state.options.language.as_ref());
+            let snapshot = editor
+                .read(cx)
+                .highlighter_snapshot::<MarkedSyntaxSnapshot>();
+            state.presentation.borrow_mut().rebuild(
+                &value,
+                state.options.language.as_ref(),
+                snapshot.as_deref(),
+            );
             cx.notify();
         });
         Self {
@@ -118,7 +123,7 @@ impl MarkedEditorState {
         let value = value.into();
         self.presentation
             .borrow_mut()
-            .rebuild(&value, self.options.language.as_ref());
+            .rebuild(&value, self.options.language.as_ref(), None);
         self.editor.update(cx, |editor, cx| {
             editor.set_value(value, window, cx);
         });
@@ -163,8 +168,23 @@ impl MarkedEditorState {
         if !editor.is_editable() || !editor.highlighter_ready() {
             return Vec::new();
         }
-        let text = editor.text().to_string();
-        find_table_ranges(&text)
+        let Some(snapshot) = editor.highlighter_snapshot::<MarkedSyntaxSnapshot>() else {
+            return Vec::new();
+        };
+        let text = editor.text();
+        snapshot
+            .table_ranges
+            .iter()
+            .filter(|range| {
+                range.start <= range.end
+                    && range.end <= text.len()
+                    && text.is_char_boundary(range.start)
+                    && text.is_char_boundary(range.end)
+                    && table_format::format_table(&text.slice((*range).clone()).to_string())
+                        .is_some()
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -176,9 +196,14 @@ struct MarkedPresentation {
 }
 
 impl MarkedPresentation {
-    fn rebuild(&mut self, text: &str, language: &str) {
+    fn rebuild(&mut self, text: &str, language: &str, snapshot: Option<&MarkedSyntaxSnapshot>) {
         self.headings.clear();
         self.backgrounds.clear();
+        if let Some(snapshot) = snapshot {
+            self.headings.clone_from(&snapshot.heading_levels);
+            self.backgrounds.clone_from(&snapshot.code_block_ranges);
+            return;
+        }
         let mut offset = 0;
         let mut in_fence = false;
         let mut fence_start = None;
@@ -337,52 +362,16 @@ impl RenderOnce for MarkedEditor {
     }
 }
 
-fn find_table_ranges(text: &str) -> Vec<Range<usize>> {
-    let mut ranges = Vec::new();
-    let mut offset = 0;
-    let mut pipe_start = None;
-    let mut ascii_start = None;
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim();
-        if trimmed == "|===" {
-            if let Some(start) = ascii_start.take() {
-                let range = start..offset + line.len();
-                if table_format::format_table(&text[range.clone()]).is_some() {
-                    ranges.push(range);
-                }
-            } else {
-                ascii_start = Some(offset);
-            }
-        }
-        if ascii_start.is_none() && trimmed.starts_with('|') && trimmed != "|===" {
-            pipe_start.get_or_insert(offset);
-        } else if let Some(start) = pipe_start.take() {
-            let range = start..offset;
-            if table_format::format_table(&text[range.clone()]).is_some() {
-                ranges.push(range);
-            }
-        }
-        offset += line.len();
-    }
-    if let Some(start) = pipe_start {
-        let range = start..text.len();
-        if table_format::format_table(&text[range.clone()]).is_some() {
-            ranges.push(range);
-        }
-    }
-    ranges
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{MarkedPresentation, find_table_ranges};
+    use super::MarkedPresentation;
     use gpui::px;
     use gpui_base::input::{InputPresentationDecorator, LinePresentation};
 
     #[test]
     fn marked_presentation_extracts_headings_and_fences() {
         let mut presentation = MarkedPresentation::default();
-        presentation.rebuild("# Title\nbody\n```\ncode\n```\n", "markdown");
+        presentation.rebuild("# Title\nbody\n```\ncode\n```\n", "markdown", None);
         assert_eq!(presentation.headings[0], Some(1));
         assert_eq!(presentation.headings[1], None);
         assert_eq!(presentation.backgrounds.len(), 1);
@@ -401,15 +390,5 @@ mod tests {
         assert!(line.line_height > px(15.));
         assert_eq!(line.spacing_before, px(5.25));
         assert_eq!(line.spacing_after, px(1.5));
-    }
-
-    #[test]
-    fn table_ranges_exclude_invalid_pipe_runs() {
-        assert!(find_table_ranges("| one line only\ntext\n").is_empty());
-        assert_eq!(
-            find_table_ranges("| a | b |\n|---|---|\n| 1 | 2 |\n").len(),
-            1
-        );
-        assert_eq!(find_table_ranges("|===\n| a | b\n| 1 | 2\n|===\n").len(), 1);
     }
 }

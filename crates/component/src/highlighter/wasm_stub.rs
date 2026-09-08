@@ -10,6 +10,13 @@ use std::time::Duration;
 // Syntax highlighter stub
 pub struct SyntaxHighlighter;
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MarkedSyntaxSnapshot {
+    pub(crate) heading_levels: Vec<Option<u8>>,
+    pub(crate) table_ranges: Vec<Range<usize>>,
+    pub(crate) code_block_ranges: Vec<Range<usize>>,
+}
+
 impl SyntaxHighlighter {
     pub fn new(_language: impl AsRef<str>) -> Self {
         Self

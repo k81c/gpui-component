@@ -870,6 +870,15 @@ impl<M: InputModeKind> InputBaseState<M> {
             .unwrap_or(false)
     }
 
+    /// Return the current parser-specific snapshot when it has the requested type.
+    #[doc(hidden)]
+    pub fn highlighter_snapshot<T: 'static>(&self) -> Option<Rc<T>> {
+        self.mode
+            .highlighter()
+            .and_then(|highlighter| highlighter.borrow().as_ref()?.document_snapshot())
+            .and_then(|snapshot| snapshot.downcast::<T>().ok())
+    }
+
     /// Set presentation padding for multi-line text and its scrollbar layout.
     #[doc(hidden)]
     pub fn set_editor_paddings(&mut self, paddings: Edges<Pixels>) {

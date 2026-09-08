@@ -1,4 +1,4 @@
-use std::{ops::Range, rc::Rc, sync::Arc};
+use std::{any::Any, ops::Range, rc::Rc, sync::Arc};
 
 use gpui::{AnyElement, Context, HighlightStyle, Hsla, Pixels, SharedString, Window};
 use ropey::Rope;
@@ -33,6 +33,15 @@ pub trait InputHighlighter {
     /// Whether the highlighter has a parse matching its current text snapshot.
     fn is_ready(&self) -> bool {
         true
+    }
+
+    /// Return a parser-specific immutable snapshot for higher-level UI features.
+    ///
+    /// Base deliberately treats this as opaque so syntax-aware components can
+    /// share the editor's parser without coupling the editing engine to a
+    /// concrete grammar or scheduling a second parse.
+    fn document_snapshot(&self) -> Option<Rc<dyn Any>> {
+        None
     }
 
     fn update(
