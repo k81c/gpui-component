@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ops::Range,
     rc::Rc,
     sync::{
@@ -30,6 +30,7 @@ pub(crate) fn input_highlighter_factory() -> InputHighlighterFactory {
 struct TreeSitterInputHighlighter {
     inner: Rc<RefCell<SyntaxHighlighter>>,
     parse_task: Rc<RefCell<Option<Task<()>>>>,
+    ready: Rc<Cell<bool>>,
 }
 
 impl TreeSitterInputHighlighter {
@@ -37,6 +38,7 @@ impl TreeSitterInputHighlighter {
         Self {
             inner: Rc::new(RefCell::new(SyntaxHighlighter::new(language))),
             parse_task: Rc::new(RefCell::new(None)),
+            ready: Rc::new(Cell::new(false)),
         }
     }
 }
@@ -57,6 +59,10 @@ impl InputHighlighter for TreeSitterInputHighlighter {
         self.inner.borrow().language().clone()
     }
 
+    fn is_ready(&self) -> bool {
+        self.ready.get()
+    }
+
     fn update(
         &mut self,
         edit: Option<BaseInputEdit>,
@@ -70,6 +76,7 @@ impl InputHighlighter for TreeSitterInputHighlighter {
         const PARSE_DEBOUNCE: Duration = Duration::from_millis(150);
 
         let edit = edit.map(to_tree_sitter_edit);
+        self.ready.set(false);
         let completed = {
             let mut highlighter = self.inner.borrow_mut();
             if text.len() > SYNC_PARSE_MAX_BYTES {
@@ -80,12 +87,14 @@ impl InputHighlighter for TreeSitterInputHighlighter {
             }
         };
         if completed {
+            self.ready.set(true);
             self.parse_task.borrow_mut().take();
             return;
         }
 
         let highlighter = self.inner.clone();
         let parse_task = self.parse_task.clone();
+        let ready = self.ready.clone();
         let language = highlighter.borrow().language().clone();
         let old_tree = highlighter.borrow().tree().cloned();
         let injection_data = highlighter.borrow().injection_parse_data();
@@ -149,6 +158,7 @@ impl InputHighlighter for TreeSitterInputHighlighter {
                 highlighter
                     .borrow_mut()
                     .apply_background_tree(tree, &text_for_apply, injections);
+                ready.set(true);
                 let _ = entity.update(cx, |state, cx| {
                     state.apply_highlighter_fold_candidates(folds, cx);
                 });

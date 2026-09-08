@@ -8,16 +8,18 @@ use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::{
     App, AppContext as _, Entity, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    StyleRefinement, Styled, Subscription, Window, div, hsla, px,
+    StyleRefinement, Styled, Subscription, Window, div, px,
 };
 
-use crate::Sizable;
 use crate::button::{Button, ButtonVariants as _};
+use crate::{ActiveTheme as _, Sizable};
 use crate::{IconName, StyledExt as _};
 
 use super::table_format;
 use super::{Editor, EditorState};
-use gpui_base::input::{BackgroundSpan, InputPresentationDecorator, LinePresentation};
+use gpui_base::input::{
+    BackgroundSpan, HighlightStyleResolver as _, InputPresentationDecorator, LinePresentation,
+};
 
 /// Options controlling a [`MarkedEditorState`].
 #[derive(Clone, Debug)]
@@ -129,7 +131,21 @@ impl MarkedEditorState {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> bool {
-        let source = self.editor.read(cx).text().slice(range.clone()).to_string();
+        let source = {
+            let editor = self.editor.read(cx);
+            if !editor.is_editable() || !editor.highlighter_ready() {
+                return false;
+            }
+            let text = editor.text();
+            if range.start > range.end
+                || range.end > text.len()
+                || !text.is_char_boundary(range.start)
+                || !text.is_char_boundary(range.end)
+            {
+                return false;
+            }
+            text.slice(range.clone()).to_string()
+        };
         let Some(formatted) = table_format::format_table(&source) else {
             return false;
         };
@@ -143,7 +159,11 @@ impl MarkedEditorState {
     }
 
     pub fn table_ranges(&self, cx: &App) -> Vec<Range<usize>> {
-        let text = self.editor.read(cx).text().to_string();
+        let editor = self.editor.read(cx);
+        if !editor.is_editable() || !editor.highlighter_ready() {
+            return Vec::new();
+        }
+        let text = editor.text().to_string();
         find_table_ranges(&text)
     }
 }
@@ -152,6 +172,7 @@ impl MarkedEditorState {
 struct MarkedPresentation {
     headings: Vec<Option<u8>>,
     backgrounds: Vec<Range<usize>>,
+    code_block_background: Option<gpui::Hsla>,
 }
 
 impl MarkedPresentation {
@@ -202,6 +223,7 @@ impl InputPresentationDecorator for MarkedDecorator {
     fn line_presentation(&self, line: usize, mut default: LinePresentation) -> LinePresentation {
         let level = self.0.borrow().headings.get(line).copied().flatten();
         if let Some(level) = level {
+            let base_line_height = default.line_height;
             let scale = match level {
                 1 => 1.8,
                 2 => 1.55,
@@ -210,13 +232,21 @@ impl InputPresentationDecorator for MarkedDecorator {
                 _ => 1.1,
             };
             default.font_size *= scale;
-            default.line_height = (default.line_height * scale).max(default.line_height * 1.15);
+            default.line_height = (base_line_height * scale).max(base_line_height * 1.15);
+            default.spacing_before = if level <= 2 {
+                base_line_height * 0.35
+            } else {
+                base_line_height * 0.2
+            };
+            default.spacing_after = base_line_height * 0.1;
         }
         default
     }
 
     fn background_spans(&self, range: &Range<usize>) -> Vec<BackgroundSpan> {
-        let color = hsla(0.7, 0.15, 0.35, 0.18);
+        let Some(color) = self.0.borrow().code_block_background else {
+            return Vec::new();
+        };
         self.0
             .borrow()
             .backgrounds
@@ -258,6 +288,13 @@ impl Styled for MarkedEditor {
 impl RenderOnce for MarkedEditor {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = self.state.read(cx);
+        let code_block_background = cx
+            .theme()
+            .highlight_theme
+            .style("text.literal.block")
+            .and_then(|style| style.background_color)
+            .unwrap_or_else(|| cx.theme().muted.opacity(0.35));
+        state.presentation.borrow_mut().code_block_background = Some(code_block_background);
         let editor = state.editor.clone();
         let options = state.options.clone();
         let ranges = if options.table_actions && !options.readonly {
@@ -275,6 +312,7 @@ impl RenderOnce for MarkedEditor {
             let Some(bounds) = editor.read(cx).range_to_bounds(&range) else {
                 continue;
             };
+            let editor_origin = editor.read(cx).input_bounds().origin;
             let action_state = marked_state.clone();
             let action_range = range.clone();
             let button = Button::new(format!("marked-editor-table-{index}"))
@@ -291,7 +329,7 @@ impl RenderOnce for MarkedEditor {
                 div()
                     .absolute()
                     .right(px(4.))
-                    .top(bounds.origin.y.max(px(0.)))
+                    .top((bounds.origin.y - editor_origin.y).max(px(0.)))
                     .child(button),
             );
         }
@@ -360,6 +398,9 @@ mod tests {
             },
         );
         assert!(line.font_size > px(10.));
+        assert!(line.line_height > px(15.));
+        assert_eq!(line.spacing_before, px(5.25));
+        assert_eq!(line.spacing_after, px(1.5));
     }
 
     #[test]

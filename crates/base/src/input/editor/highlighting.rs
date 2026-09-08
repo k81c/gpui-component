@@ -30,6 +30,11 @@ impl HighlightStyleResolver for NoHighlightStyles {
 pub trait InputHighlighter {
     fn language(&self) -> SharedString;
 
+    /// Whether the highlighter has a parse matching its current text snapshot.
+    fn is_ready(&self) -> bool {
+        true
+    }
+
     fn update(
         &mut self,
         edit: Option<InputEdit>,

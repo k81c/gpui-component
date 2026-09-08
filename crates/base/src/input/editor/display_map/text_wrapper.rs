@@ -758,6 +758,21 @@ impl LineLayout {
         last_layout: &LastLayout,
         line_end_affinity: bool,
     ) -> Option<Point<Pixels>> {
+        self.position_for_index_with_line_height(
+            offset,
+            last_layout,
+            last_layout.line_height,
+            line_end_affinity,
+        )
+    }
+
+    pub(crate) fn position_for_index_with_line_height(
+        &self,
+        offset: usize,
+        last_layout: &LastLayout,
+        line_height: Pixels,
+        line_end_affinity: bool,
+    ) -> Option<Point<Pixels>> {
         let mut acc_len = 0;
         let mut offset_y = px(0.);
 
@@ -787,7 +802,7 @@ impl LineLayout {
             // Always advance by actual line length. The last line gets +1 so the
             // cursor can be placed after the final character.
             acc_len += if is_last { line.len + 1 } else { line.len };
-            offset_y += last_layout.line_height;
+            offset_y += line_height;
         }
 
         None
@@ -822,13 +837,14 @@ impl LineLayout {
         &self,
         pos: Point<Pixels>,
         last_layout: &LastLayout,
+        line_height: Pixels,
     ) -> Option<(usize, usize, Pixels)> {
         let mut offset = 0;
         let mut line_top = px(0.);
         let x_offset = last_layout.alignment_offset(self.longest_width);
 
         for (i, line) in self.wrapped_lines.iter().enumerate() {
-            let line_bottom = line_top + last_layout.line_height;
+            let line_bottom = line_top + line_height;
             if pos.y >= line_top && pos.y < line_bottom {
                 return Some((i, offset, pos.x - x_offset - self.line_indent(i)));
             }
@@ -850,12 +866,22 @@ impl LineLayout {
     /// the next, so the affinity is what tells [`Self::position_for_index`] which of the two the
     /// caret belongs to. Without it a click past the last glyph of a wrapped line would put a
     /// visible caret on the following line.
+    #[allow(dead_code)]
     pub(crate) fn closest_index_for_position(
         &self,
         pos: Point<Pixels>,
         last_layout: &LastLayout,
     ) -> Option<(usize, bool)> {
-        let (i, offset, x) = self.wrapped_line_at(pos, last_layout)?;
+        self.closest_index_for_position_with_line_height(pos, last_layout, last_layout.line_height)
+    }
+
+    pub(crate) fn closest_index_for_position_with_line_height(
+        &self,
+        pos: Point<Pixels>,
+        last_layout: &LastLayout,
+        line_height: Pixels,
+    ) -> Option<(usize, bool)> {
+        let (i, offset, x) = self.wrapped_line_at(pos, last_layout, line_height)?;
         let line = &self.wrapped_lines[i];
         let ix = line.closest_index_for_x(x);
         let line_end_affinity = i + 1 < self.wrapped_lines.len() && ix == line.len;
@@ -873,12 +899,22 @@ impl LineLayout {
     /// merely lives on the following row.
     ///
     /// The `pos` is relative to the top-left corner of this line layout, start from (0, 0).
+    #[allow(dead_code)]
     pub(crate) fn columns_past_line_end(
         &self,
         pos: Point<Pixels>,
         last_layout: &LastLayout,
     ) -> usize {
-        let Some((i, _, x)) = self.wrapped_line_at(pos, last_layout) else {
+        self.columns_past_line_end_with_line_height(pos, last_layout, last_layout.line_height)
+    }
+
+    pub(crate) fn columns_past_line_end_with_line_height(
+        &self,
+        pos: Point<Pixels>,
+        last_layout: &LastLayout,
+        line_height: Pixels,
+    ) -> usize {
+        let Some((i, _, x)) = self.wrapped_line_at(pos, last_layout, line_height) else {
             return 0;
         };
 
@@ -894,12 +930,22 @@ impl LineLayout {
         (past_end / last_layout.space_width).round() as usize
     }
 
+    #[allow(dead_code)]
     pub(crate) fn index_for_position(
         &self,
         pos: Point<Pixels>,
         last_layout: &LastLayout,
     ) -> Option<usize> {
-        let (i, offset, x) = self.wrapped_line_at(pos, last_layout)?;
+        self.index_for_position_with_line_height(pos, last_layout, last_layout.line_height)
+    }
+
+    pub(crate) fn index_for_position_with_line_height(
+        &self,
+        pos: Point<Pixels>,
+        last_layout: &LastLayout,
+        line_height: Pixels,
+    ) -> Option<usize> {
+        let (i, offset, x) = self.wrapped_line_at(pos, last_layout, line_height)?;
 
         Some(offset + self.wrapped_lines[i].index_for_x(x)?)
     }
@@ -1350,6 +1396,13 @@ mod tests {
             visible_range_offset: 0..0,
             lines: Rc::new(vec![]),
             line_height,
+            line_presentations: Rc::new(vec![crate::input::LinePresentation {
+                font_size: line_height,
+                line_height,
+                spacing_before: px(0.),
+                spacing_after: px(0.),
+            }]),
+            vertical_layout: crate::input::layout::VerticalLayoutMap::new(vec![line_height]),
             wrap_width: None,
             wrapping_indent: WrappingIndent::default(),
             line_number_width: px(0.),
@@ -1651,6 +1704,13 @@ mod tests {
             visible_range_offset: 0..0,
             lines: Rc::new(vec![]),
             line_height: px(20.0),
+            line_presentations: Rc::new(vec![crate::input::LinePresentation {
+                font_size: px(20.),
+                line_height: px(20.),
+                spacing_before: px(0.),
+                spacing_after: px(0.),
+            }]),
+            vertical_layout: crate::input::layout::VerticalLayoutMap::new(vec![px(20.)]),
             wrap_width: Some(px(10.)),
             wrapping_indent: WrappingIndent::Same,
             line_number_width: px(0.),

@@ -117,16 +117,19 @@ impl<M: InputModeKind> TextElement<M> {
             self.measure_indent_width(text_style, state.mode.tab_size().tab_size, window);
 
         let tab_size = state.mode.tab_size();
-        let line_height = last_layout.line_height;
         let mut builder = PathBuilder::stroke(px(1.));
         let mut offset_y = last_layout.visible_top;
         let mut last_indents = vec![];
 
-        for (&buffer_line, line_layout) in last_layout
+        for (visible_index, (&buffer_line, line_layout)) in last_layout
             .visible_buffer_lines
             .iter()
             .zip(last_layout.lines.iter())
+            .enumerate()
         {
+            let presentation = last_layout.presentation_for_visible_index(visible_index);
+            let content_height = line_layout.size(presentation.line_height).height;
+            let line_top = offset_y + presentation.spacing_before;
             let line = state.text.slice_line(buffer_line);
             let mut current_indents = vec![];
             if line.len() > 0 {
@@ -138,22 +141,22 @@ impl<M: InputModeKind> TextElement<M> {
                         px(0.)
                     };
 
-                    let pos = point(x + last_layout.line_number_width, offset_y);
+                    let pos = point(x + last_layout.line_number_width, line_top);
 
                     builder.move_to(pos);
-                    builder.line_to(point(pos.x, pos.y + line_height));
+                    builder.line_to(point(pos.x, pos.y + content_height));
                     current_indents.push(pos.x);
                 }
             } else if last_indents.len() > 0 {
                 for x in &last_indents {
-                    let pos = point(*x, offset_y);
+                    let pos = point(*x, line_top);
                     builder.move_to(pos);
-                    builder.line_to(point(pos.x, pos.y + line_height));
+                    builder.line_to(point(pos.x, pos.y + content_height));
                 }
                 current_indents = last_indents.clone();
             }
 
-            offset_y += line_layout.wrapped_lines.len() * line_height;
+            offset_y += presentation.spacing_before + content_height + presentation.spacing_after;
             last_indents = current_indents;
         }
 

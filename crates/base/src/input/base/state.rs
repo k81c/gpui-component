@@ -857,6 +857,19 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.presentation_decorator.clone()
     }
 
+    /// Whether the configured highlighter has finished parsing the current text.
+    pub fn highlighter_ready(&self) -> bool {
+        self.mode
+            .highlighter()
+            .and_then(|highlighter| {
+                highlighter
+                    .borrow()
+                    .as_ref()
+                    .map(|highlighter| highlighter.is_ready())
+            })
+            .unwrap_or(false)
+    }
+
     /// Set presentation padding for multi-line text and its scrollbar layout.
     #[doc(hidden)]
     pub fn set_editor_paddings(&mut self, paddings: Edges<Pixels>) {
@@ -909,19 +922,29 @@ impl<M: InputModeKind> InputBaseState<M> {
         let Some(last_layout) = &self.last_layout else {
             return (0, 0, None);
         };
-        let line_height = last_layout.line_height;
-
         let mut y_offset = last_layout.visible_top;
         for (vi, line) in last_layout.lines.iter().enumerate() {
+            let presentation = last_layout.presentation_for_visible_index(vi);
+            let line_height = presentation.line_height;
             let prev_lines_offset = last_layout.visible_line_byte_offsets[vi];
             let local_offset = offset.saturating_sub(prev_lines_offset);
-            if let Some(pos) = line.position_for_index(local_offset, last_layout, false) {
+            if let Some(pos) = line.position_for_index_with_line_height(
+                local_offset,
+                last_layout,
+                line_height,
+                false,
+            ) {
                 let sub_line_index = (pos.y / line_height) as usize;
-                let adjusted_pos = point(pos.x + last_layout.line_number_width, pos.y + y_offset);
+                let adjusted_pos = point(
+                    pos.x + last_layout.line_number_width,
+                    pos.y + y_offset + presentation.spacing_before,
+                );
                 return (vi, sub_line_index, Some(adjusted_pos));
             }
 
-            y_offset += line.size(line_height).height;
+            y_offset += presentation.spacing_before
+                + line.size(line_height).height
+                + presentation.spacing_after;
         }
         (0, 0, None)
     }
@@ -2522,11 +2545,33 @@ impl<M: InputModeKind> InputBaseState<M> {
 
         let row = point.row;
 
-        // Resolve the wrapped row even when the target is outside the last layout.
+        let visible_index = last_layout
+            .visible_buffer_lines
+            .iter()
+            .position(|line| *line == row);
+        let presentation = last_layout
+            .presentation_for_buffer_line(row)
+            .unwrap_or(crate::input::LinePresentation {
+                font_size: line_height,
+                line_height,
+                spacing_before: px(0.),
+                spacing_after: px(0.),
+            });
+
+        // Resolve the wrapped row even when the target is outside the shaped
+        // visible range. Variable-height lines still share one presentation
+        // across their wrapped rows.
         let display_pos = self
             .display_map
             .buffer_pos_to_display_pos(crate::input::BufferPoint::new(row, point.column));
-        let row_offset_y = line_height * display_pos.row;
+        let wrapped_row = self
+            .display_map
+            .buffer_line_to_display_row_range(row)
+            .map(|range| display_pos.row.saturating_sub(range.start))
+            .unwrap_or(0);
+        let mut row_offset_y = last_layout.vertical_layout.origin_for_line(row)
+            + presentation.spacing_before
+            + presentation.line_height * wrapped_row;
 
         // For Right alignment use 0 margin: the cursor indicator is clamped inside bounds
         // in layout_cursors, so shifting the text here would cause a first-click visual jump.
@@ -2535,16 +2580,20 @@ impl<M: InputModeKind> InputBaseState<M> {
             TextAlign::Right => px(0.),
             TextAlign::Center => CURSOR_WIDTH,
         };
-        if let Some(vi) = last_layout
-            .visible_buffer_lines
-            .iter()
-            .position(|&line| line == row)
-        {
+        if let Some(vi) = visible_index {
             let line = &last_layout.lines[vi];
             let local_offset = offset.saturating_sub(last_layout.visible_line_byte_offsets[vi]);
-            if let Some(pos) = line.position_for_index(local_offset, last_layout, false) {
+            if let Some(pos) = line.position_for_index_with_line_height(
+                local_offset,
+                last_layout,
+                presentation.line_height,
+                false,
+            ) {
                 let bounds_width = bounds.size.width - last_layout.line_number_width;
                 let col_offset_x = pos.x;
+                row_offset_y = last_layout.vertical_layout.origin_for_line(row)
+                    + presentation.spacing_before
+                    + pos.y;
                 if col_offset_x - safety_margin < -scroll_offset.x {
                     // If the position is out of the visible area, scroll to make it visible
                     scroll_offset.x = -col_offset_x + safety_margin;
@@ -2567,11 +2616,11 @@ impl<M: InputModeKind> InputBaseState<M> {
                     line_height,
                 )
             } else {
-                line_height
+                presentation.line_height
             };
-        if row_offset_y - edge_height + line_height < -scroll_offset.y {
+        if row_offset_y - edge_height + presentation.line_height < -scroll_offset.y {
             // Scroll up
-            scroll_offset.y = -row_offset_y + edge_height - line_height;
+            scroll_offset.y = -row_offset_y + edge_height - presentation.line_height;
         } else if row_offset_y + edge_height > -scroll_offset.y + bounds.size.height {
             // Scroll down
             scroll_offset.y = -(row_offset_y - bounds.size.height + edge_height);
@@ -2972,7 +3021,6 @@ impl<M: InputModeKind> InputBaseState<M> {
             return (0, false, 0);
         };
 
-        let line_height = last_layout.line_height;
         let line_number_width = last_layout.line_number_width;
 
         // TIP: About the IBeam cursor
@@ -2999,10 +3047,12 @@ impl<M: InputModeKind> InputBaseState<M> {
             .zip(last_layout.visible_buffer_lines.iter())
             .enumerate()
         {
+            let presentation = last_layout.presentation_for_visible_index(vi);
+            let line_height = presentation.line_height;
             let line_start_offset = last_layout.visible_line_byte_offsets[vi];
 
             // Calculate line origin for this display row
-            let line_origin = point(px(0.), y_offset);
+            let line_origin = point(px(0.), y_offset + presentation.spacing_before);
             let pos = inner_position - line_origin;
 
             // Return offset by use closest_index_for_x if is single line mode.
@@ -3017,20 +3067,26 @@ impl<M: InputModeKind> InputBaseState<M> {
             }
 
             // Check if mouse is in this line's bounds
-            if let Some((local_index, line_end_affinity)) =
-                line_layout.closest_index_for_position(pos, last_layout)
+            if let Some((local_index, line_end_affinity)) = line_layout
+                .closest_index_for_position_with_line_height(pos, last_layout, line_height)
             {
                 return (
                     self.resolve_index(line_start_offset + local_index),
                     line_end_affinity,
-                    line_layout.columns_past_line_end(pos, last_layout),
+                    line_layout.columns_past_line_end_with_line_height(
+                        pos,
+                        last_layout,
+                        line_height,
+                    ),
                 );
             } else if pos.y < px(0.) {
                 // Mouse is above this line, return start of this line
                 return (self.resolve_index(line_start_offset), false, 0);
             }
 
-            y_offset += line_layout.size(line_height).height;
+            y_offset += presentation.spacing_before
+                + line_layout.size(line_height).height
+                + presentation.spacing_after;
             last_line_pos = Some(pos);
         }
 
@@ -3042,8 +3098,17 @@ impl<M: InputModeKind> InputBaseState<M> {
             .last()
             .zip(last_line_pos)
             .map(|(line_layout, pos)| {
+                let line_height = last_layout
+                    .line_presentations
+                    .last()
+                    .map(|presentation| presentation.line_height)
+                    .unwrap_or(last_layout.line_height);
                 let last_row_top = (line_layout.size(line_height).height - line_height).max(px(0.));
-                line_layout.columns_past_line_end(point(pos.x, last_row_top), last_layout)
+                line_layout.columns_past_line_end_with_line_height(
+                    point(pos.x, last_row_top),
+                    last_layout,
+                    line_height,
+                )
             })
             .unwrap_or(0);
 
@@ -3509,7 +3574,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         };
 
         let (_, _, start_pos) = self.line_and_position_for_offset(range.start);
-        let (_, _, end_pos) = self.line_and_position_for_offset(range.end);
+        let (end_line, _, end_pos) = self.line_and_position_for_offset(range.end);
 
         let Some(start_pos) = start_pos else {
             return None;
@@ -3518,9 +3583,15 @@ impl<M: InputModeKind> InputBaseState<M> {
             return None;
         };
 
+        let end_line_height = last_layout
+            .line_presentations
+            .get(end_line)
+            .map(|presentation| presentation.line_height)
+            .unwrap_or(last_layout.line_height);
+
         Some(Bounds::from_corners(
             last_bounds.origin + start_pos,
-            last_bounds.origin + end_pos + point(px(0.), last_layout.line_height),
+            last_bounds.origin + end_pos + point(px(0.), end_line_height),
         ))
     }
 
@@ -4208,16 +4279,18 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
-        let line_height = last_layout.line_height;
         let line_number_width = last_layout.line_number_width;
         let range = self.range_from_utf16(&range_utf16);
 
         let mut start_origin = None;
         let mut end_origin = None;
+        let mut end_line_height = last_layout.line_height;
         let line_number_origin = point(line_number_width, px(0.));
         let mut y_offset = last_layout.visible_top;
 
         for (vi, line) in last_layout.lines.iter().enumerate() {
+            let presentation = last_layout.presentation_for_visible_index(vi);
+            let line_height = presentation.line_height;
             if start_origin.is_some() && end_origin.is_some() {
                 break;
             }
@@ -4225,26 +4298,31 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
             let index_offset = last_layout.visible_line_byte_offsets[vi];
 
             if start_origin.is_none() {
-                if let Some(p) = line.position_for_index(
+                if let Some(p) = line.position_for_index_with_line_height(
                     range.start.saturating_sub(index_offset),
                     last_layout,
+                    line_height,
                     false,
                 ) {
-                    start_origin = Some(p + point(px(0.), y_offset));
+                    start_origin = Some(p + point(px(0.), y_offset + presentation.spacing_before));
                 }
             }
 
             if end_origin.is_none() {
-                if let Some(p) = line.position_for_index(
+                if let Some(p) = line.position_for_index_with_line_height(
                     range.end.saturating_sub(index_offset),
                     last_layout,
+                    line_height,
                     false,
                 ) {
-                    end_origin = Some(p + point(px(0.), y_offset));
+                    end_origin = Some(p + point(px(0.), y_offset + presentation.spacing_before));
+                    end_line_height = line_height;
                 }
             }
 
-            y_offset += line.size(line_height).height;
+            y_offset += presentation.spacing_before
+                + line.size(line_height).height
+                + presentation.spacing_after;
         }
 
         let start_origin = start_origin.unwrap_or_default();
@@ -4255,7 +4333,9 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         Some(Bounds::from_corners(
             bounds.origin + line_number_origin + start_origin,
             // + line_height for show IME panel under the cursor line.
-            bounds.origin + line_number_origin + point(end_origin.x, end_origin.y + line_height),
+            bounds.origin
+                + line_number_origin
+                + point(end_origin.x, end_origin.y + end_line_height),
         ))
     }
 
@@ -4266,13 +4346,24 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         let last_layout = self.last_layout.as_ref()?;
-        let line_point = self.last_bounds?.localize(&point)?;
+        let line_point = self.last_bounds?.localize(&point)?
+            - gpui::point(last_layout.line_number_width, px(0.));
+        let mut y_offset = last_layout.visible_top;
 
         for (vi, line) in last_layout.lines.iter().enumerate() {
             let offset = last_layout.visible_line_byte_offsets[vi];
-            if let Some(utf8_index) = line.index_for_position(line_point, last_layout) {
+            let presentation = last_layout.presentation_for_visible_index(vi);
+            let line_origin = gpui::point(px(0.), y_offset + presentation.spacing_before);
+            if let Some(utf8_index) = line.index_for_position_with_line_height(
+                line_point - line_origin,
+                last_layout,
+                presentation.line_height,
+            ) {
                 return Some(self.offset_to_utf16(offset + utf8_index));
             }
+            y_offset += presentation.spacing_before
+                + line.size(presentation.line_height).height
+                + presentation.spacing_after;
         }
 
         None

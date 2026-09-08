@@ -150,13 +150,20 @@ impl<M: InputModeKind> InputBaseState<M> {
 
             // If in visible range, prefer to use position to get column.
             if let Some(line) = last_layout.line(next_point.row) {
-                if let Some((x, line_end_affinity)) = line.closest_index_for_position(
-                    Point {
-                        x: preferred_x,
-                        y: next_display_point.local_row * last_layout.line_height,
-                    },
-                    last_layout,
-                ) {
+                let line_height = last_layout
+                    .presentation_for_buffer_line(next_point.row)
+                    .map(|presentation| presentation.line_height)
+                    .unwrap_or(last_layout.line_height);
+                if let Some((x, line_end_affinity)) = line
+                    .closest_index_for_position_with_line_height(
+                        Point {
+                            x: preferred_x,
+                            y: next_display_point.local_row * line_height,
+                        },
+                        last_layout,
+                        line_height,
+                    )
+                {
                     new_offset = line_start_offset + x;
                     // Landing on a wrap boundary means the preferred column pointed past the
                     // last glyph of the target row, so the caret stays on that row.
