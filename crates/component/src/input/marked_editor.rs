@@ -341,14 +341,11 @@ impl RenderOnce for MarkedEditor {
         };
         let marked_state = self.state.clone();
 
-        let mut root = div()
-            .relative()
-            .size_full()
-            .child(
-                Editor::new(&editor)
-                    .readonly(options.readonly)
-                    .h(gpui::relative(1.)),
-            );
+        let mut root = div().relative().size_full().child(
+            Editor::new(&editor)
+                .readonly(options.readonly)
+                .h(gpui::relative(1.)),
+        );
         for (index, range) in ranges.into_iter().enumerate() {
             let Some(bounds) = editor.read(cx).range_to_bounds(&range) else {
                 continue;
@@ -380,9 +377,22 @@ impl RenderOnce for MarkedEditor {
 
 #[cfg(test)]
 mod tests {
-    use super::MarkedPresentation;
-    use gpui::px;
+    use super::{MarkedEditor, MarkedEditorOptions, MarkedEditorState, MarkedPresentation};
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, Window, div, px,
+    };
     use gpui_base::input::{InputPresentationDecorator, LinePresentation};
+
+    struct Harness {
+        marked: Entity<MarkedEditorState>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(MarkedEditor::new(&self.marked))
+        }
+    }
 
     #[test]
     fn marked_presentation_extracts_headings_and_fences() {
@@ -406,5 +416,80 @@ mod tests {
         assert!(line.line_height > px(15.));
         assert_eq!(line.spacing_before, px(5.25));
         assert_eq!(line.spacing_after, px(1.5));
+    }
+
+    #[gpui::test]
+    fn readonly_marked_editor_rejects_table_format(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let mut marked = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let state = cx.new(|cx| {
+                let mut state = MarkedEditorState::new(
+                    MarkedEditorOptions {
+                        readonly: true,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+                state.set_value("| A | B |\n| --- | --- |\n| x | y |\n", window, cx);
+                state
+            });
+            marked = Some(state.clone());
+            Harness { marked: state }
+        });
+        let marked = marked.expect("marked editor was created");
+
+        VisualTestContext::update(cx, |window, cx| {
+            let changed = marked.update(cx, |state, cx| {
+                state.format_table_at(0..usize::MAX, window, cx)
+            });
+            assert!(!changed);
+            assert!(marked.read(cx).table_ranges(cx).is_empty());
+        });
+    }
+
+    #[cfg(feature = "tree-sitter-markdown")]
+    #[gpui::test]
+    fn table_format_is_one_undoable_edit(cx: &mut TestAppContext) {
+        use gpui_base::input::Undo;
+
+        const SOURCE: &str = "| A | Longer |\n| --- | --- |\n| 日本 | x |\n";
+        cx.update(crate::init);
+        let mut marked = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let state = cx.new(|cx| {
+                let mut state = MarkedEditorState::with_language("markdown", window, cx);
+                state.set_value(SOURCE, window, cx);
+                state
+            });
+            marked = Some(state.clone());
+            Harness { marked: state }
+        });
+        let marked = marked.expect("marked editor was created");
+        VisualTestContext::update(cx, |window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        VisualTestContext::run_until_parked(cx);
+
+        let editor = marked.read_with(cx, |state, _| state.editor().clone());
+        VisualTestContext::update(cx, |window, cx| {
+            assert!(editor.read(cx).highlighter_ready());
+            assert!(marked.update(cx, |state, cx| {
+                state.format_table_at(0..SOURCE.len(), window, cx)
+            }));
+            assert_ne!(editor.read(cx).value().as_ref(), SOURCE);
+            editor.update(cx, |state, cx| state.focus(window, cx));
+        });
+        VisualTestContext::update(cx, |window, cx| {
+            let _ = window.draw(cx);
+        });
+        VisualTestContext::update(cx, |window, cx| {
+            window.dispatch_action(Box::new(Undo), cx);
+        });
+        VisualTestContext::run_until_parked(cx);
+        assert_eq!(editor.read_with(cx, |state, _| state.value()), SOURCE);
     }
 }
