@@ -7,16 +7,17 @@
 
 ## 対象と確認済み基準
 
-- upstream 基準: `longbridge/gpui-kit` の `20d65289d7e4d2573456b8ed907a73876d224bd1`
-- fork ブランチ: `codex/sync-upstream-20d65289`
-- 機能移植の確認基準コミット: `ef026a37` 以降
-- 対象 package: `gpui-kit` / `gpui-component` 0.6.0
+- upstream 基準: `longbridge/gpui-kit` の `7f6d92327936fbab7994a35c86328d793acc060d`
+- upstream HEAD 確認日: 2026-09-19（実装開始時に `upstream/main` を fetch 後に固定）
+- fork ブランチ: `codex/sync-upstream-7f6d9232`
+- 対象 package: `gpui-base` / `gpui-component` / `gpui-kit` 0.6.2
 - 主対象: native の Markdown、Djot、AsciiDoc 編集画面
 
 この確認はソース比較、Rust のユニットテスト、native Story と Story Web のビルドに
-基づきます。実アプリのテーマ、ウィンドウ寸法、入力データを使った目視確認までは
-このリポジトリ内では実施していません。専用の `MarkedEditor` Story もまだないため、
-Story の成功はコンパイル互換の確認であり、対話・描画の証明ではありません。
+基づきます。専用の `MarkedEditor` Story は Markdown、Djot、AsciiDoc、editable / read-only、
+atomic inline token、長い折り返し、表、コードブロック、高さ制約を収録します。実アプリの
+テーマ、ウィンドウ寸法、入力データを使った目視確認は別途必要であり、Story のビルド成功
+だけを対話・描画の証明とはみなしません。
 
 ## エージェント向け実行契約
 
@@ -67,6 +68,7 @@ gpui-kit = { git = "<fork-repository-url>", rev = "<published-sync-commit>", fea
 | `Entity<InputState>` を marked editor として保持 | `Entity<MarkedEditorState>` を保持 |
 | `Input::new(&state)` で marked editor を描画 | `MarkedEditor::new(&state)` |
 | `InputState::format_table_at(range, ...)` | `MarkedEditorState::format_table_at(range, ...)` |
+| token 付き文書の復元 | `MarkedEditorState::set_content(InputContent, ...)` |
 | marked editor の値・選択・検索・LSP API | `marked.read(cx).editor().clone()` で内部 `Entity<EditorState>` を取得して利用 |
 | `InputState` からの `InputEvent` 購読 | 内部 `Entity<EditorState>` の `InputEvent` を購読 |
 | 行頭検索による見出し・表判定 | `MarkedEditorState` が共有 Tree-sitter parser の snapshot を利用するため、アプリ実装は削除 |
@@ -171,6 +173,10 @@ editor.update(cx, |state, cx| {
 `set_value` しても observer は追従しますが、facade 経由なら解析完了前の見出し表示も
 即時更新されます。
 
+atomic inline token を含む文書は `InputContent` を組み立て、`set_content` で復元します。
+token の byte range は本文と一致し、UTF-8 文字境界上になければなりません。見出し行の
+token もその行の拡大された line height で測定・配置されます。
+
 ## 表整形
 
 `table_actions: true` かつ editable で解析が最新なら、`MarkedEditor` が解析木で認識した
@@ -208,12 +214,34 @@ if let Some(range) = range {
 | 構造 snapshot | 同じ Tree-sitter parse から見出し、表、コードブロック range を取得。コードブロック内の見かけ上の見出し・表は除外 |
 | 見出し表示 | Markdown / Djot / AsciiDoc の heading level に応じた font size、line height、前後 spacing |
 | 可変行高 | scroll extent、visible range、caret、selection、hit testing、IME、fold icon、背景、行番号、indent guide が同じ vertical map を使用 |
+| atomic inline token | 行ごとの font size / line height / spacing で測定・配置・wrap・hit testing。UTF-8 編集と undo は upstream の token 履歴を維持 |
 | コードブロック背景 | active theme の `text.literal.block` を使用し、未定義時は muted color へ fallback |
 | 表整形 | Markdown / Djot pipe table と AsciiDoc table、UTF-8 byte range 検証、単一 undo |
 | rich `TextView` | upstream の code-block callback と highlighter identity cache を利用。旧 `text/node.rs` は復元していない |
 
 意図的に移植していないものは、旧 API shim、旧 `InputState` 内の marked mode、旧 300 ms
 遅延 task、移設前の Dock / Text / Input ファイルです。
+
+## 旧コミットから同期コミットへの対応
+
+旧 6 コミットを一対一で機械的に再生せず、最新 upstream 上で意味単位に再構成しました。
+
+| 旧 fork コミット | 同期ブランチの対応 | 内容 |
+| --- | --- | --- |
+| `d060e763` | `f169f6a1` | fork metadata と ignore 設定 |
+| `b27a8e03` | `6c6dd344` | MarkedEditor、言語 feature、grammar / query |
+| `3d77b07f` | `1a3d524e` | table passthrough 行保持 |
+| `b2ff1f5d` | `e56f2738` | 可変行高と editor vertical presentation |
+| `ef026a37` | `923499da` | parser parity、snapshot、非同期解析 |
+| `0108a8b6` | `f3d1e5ed` | 利用アプリ移行コンテキスト |
+| 元 worktree の未コミット高さ修正 | `55a7c944` | `MarkedEditor` 内部 `Editor` の相対高さ 100% |
+
+最新 upstream の atomic inline token との統合は `52c18a92`、専用 Story は `15757428`
+として追加しました。対応の再確認には次を使います。
+
+```text
+git range-diff 20d65289d7e4d2573456b8ed907a73876d224bd1..0108a8b634db9e25d745d8c40f8ae526c45e33fc 7f6d92327936fbab7994a35c86328d793acc060d..codex/sync-upstream-7f6d9232
+```
 
 ## アプリ側の探索手順
 
@@ -248,28 +276,51 @@ site だけを一つの移行単位にします。
 
 ## リポジトリ側の検証記録
 
-次は確認基準コミットまでの機能を含む working tree で成功しています。
+確認環境は Windows x86_64、`rustc 1.97.0-nightly (ad3a598ca 2026-05-03)`、
+`cargo 1.97.0-nightly (4f9b52075 2026-05-01)` です。lockfile は固定 upstream 版を種にし、
+AsciiDoc / AsciiDoc Inline / Djot の grammar 解決後はすべて `--locked` で実行しました。
+
+成功:
 
 ```text
 cargo +nightly fmt --all -- --check
-cargo +nightly check -p gpui-component --features tree-sitter-languages
-cargo +nightly check -p gpui-kit --features tree-sitter-asciidoc,tree-sitter-djot
-cargo +nightly check -p gpui-component-story
-cargo +nightly check -p gpui-component-story-web
-cargo +nightly test -p gpui-component --features tree-sitter-languages highlighter:: --lib
-cargo +nightly test -p gpui-component --features tree-sitter-languages input::marked_editor --lib
-cargo +nightly test -p gpui-component --features tree-sitter-languages input::table_format --lib
-cargo +nightly test -p gpui-base vertical_layout --lib
-cargo +nightly test -p gpui-base text_wrapper --lib
+cargo +nightly check -p gpui-component --features tree-sitter-languages --locked
+cargo +nightly check -p gpui-component --no-default-features --locked
+cargo +nightly check -p gpui-kit --features tree-sitter-asciidoc,tree-sitter-djot --locked
+cargo +nightly check -p gpui-component-story --locked
+cargo +nightly test -p gpui-component --features tree-sitter-languages highlighter:: --lib --locked
+cargo +nightly test -p gpui-component --features tree-sitter-languages input::marked_editor --lib --locked
+cargo +nightly test -p gpui-component --features tree-sitter-languages input::table_format --lib --locked
+cargo +nightly test -p gpui-base inline_token --lib --locked
+cargo +nightly test -p gpui-base vertical_layout --lib --locked
+cargo +nightly test -p gpui-base text_wrapper --lib --locked
+cargo +nightly test -p gpui-base test_auto_close --lib --locked
+cargo +nightly test -p gpui-base smart_indent --lib --locked
+cargo +nightly test -p gpui-base search_ --lib --locked
+cargo +nightly test -p gpui-base multi_cursor --lib --locked
+git diff --check
 ```
 
-確認環境の stable `rustc 1.94.0` では、依存する `gpui-pre 0.3.2` が
-`std::hint::cold_path` を使うため `E0658` で停止します。fork の今回の差分ではなく依存
-toolchain の制約です。確認には `rustc 1.97.0-nightly` を使いました。
+対象テストの結果は highlighter 26、MarkedEditor 3、table format 3、inline token 6、
+vertical layout 1、text wrapper 13、auto-close 8、smart-indent 3、search 7、multi-cursor 22 の
+全件成功です。`Cargo.lock` の固定 upstream との差分は上記 3 grammar と
+`gpui-component` の dependency entry だけで、無関係な更新はありません。
 
-Story Web は build できますが、tree-sitter 無効構成では native と同じ構造解析を提供
-しません。WASM を本番対象にする場合、表ボタンを必須要件にせず、WASM 向け parser
-戦略を別途決めてください。
+未検証または成功扱いにしない項目:
+
+- `cargo +nightly check -p gpui-component-story-web --target wasm32-unknown-unknown --locked`
+  は nightly toolchain に `wasm32-unknown-unknown` target が未導入のため `E0463` で停止。
+- native Story の目視確認（wrap、上下移動、選択、pointer hit testing、IME、scroll、
+  テーマ切替、相対高さ）は、この実行環境から native window を観察できないため未実施。
+- プロジェクト方針どおり全 workspace test suite は実行していない。
+
+確認環境の stable `rustc 1.94.0` では、依存する `gpui-pre 0.3.5` が
+`std::hint::cold_path` を使うため `E0658` で停止します。fork の今回の差分ではなく依存
+toolchain の制約です。
+
+Story Web は tree-sitter 無効構成では native と同じ構造解析を提供しません。WASM を
+本番対象にする場合、target 導入後にコンパイルを再確認し、表ボタンを必須要件にせず、
+WASM 向け parser 戦略を別途決めてください。
 
 ## 完了条件
 
