@@ -344,7 +344,11 @@ impl RenderOnce for MarkedEditor {
         let mut root = div()
             .relative()
             .size_full()
-            .child(Editor::new(&editor).readonly(options.readonly));
+            .child(
+                Editor::new(&editor)
+                    .readonly(options.readonly)
+                    .h(gpui::relative(1.)),
+            );
         for (index, range) in ranges.into_iter().enumerate() {
             let Some(bounds) = editor.read(cx).range_to_bounds(&range) else {
                 continue;
