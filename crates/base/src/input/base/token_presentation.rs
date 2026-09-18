@@ -114,11 +114,11 @@ use gpui::ParentElement as _;
 
 #[derive(Default)]
 pub(super) struct TokenLayoutCache {
-    pub(super) key: Option<(Font, Pixels, Pixels, Pixels, bool)>,
+    pub(super) key: Option<(Font, Pixels, Pixels, Pixels, bool, u64)>,
     pub(super) revision: u64,
     pub(super) unwrapped_width: Pixels,
     pub(super) metrics: Rc<[(Range<usize>, Pixels)]>,
-    pub(super) widths: HashMap<InlineToken, Pixels>,
+    pub(super) widths: HashMap<usize, Pixels>,
 }
 
 impl<M: InputModeKind> InputBaseState<M> {

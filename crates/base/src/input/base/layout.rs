@@ -71,7 +71,10 @@ pub(super) struct LastLayout {
     pub(super) visible_range_offset: Range<usize>,
     pub(super) lines: Rc<Vec<LineLayout>>,
     pub(super) line_height: Pixels,
+    /// Presentations for shaped visible lines, parallel to `visible_buffer_lines`.
     pub(crate) line_presentations: Rc<Vec<LinePresentation>>,
+    /// Presentations for every buffer line, used before or outside shaping.
+    pub(crate) all_line_presentations: Rc<Vec<LinePresentation>>,
     pub(crate) vertical_layout: VerticalLayoutMap,
     pub(super) wrap_width: Option<Pixels>,
     pub(super) wrapping_indent: WrappingIndent,
@@ -114,8 +117,7 @@ impl LastLayout {
     }
 
     pub(crate) fn presentation_for_buffer_line(&self, line: usize) -> Option<LinePresentation> {
-        let index = self.visible_buffer_lines.binary_search(&line).ok()?;
-        self.line_presentations.get(index).copied()
+        self.all_line_presentations.get(line).copied()
     }
 }
 

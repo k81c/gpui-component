@@ -1604,18 +1604,28 @@ impl<M: InputModeKind> TextElement<M> {
         &self,
         width: Pixels,
         line_height: Pixels,
+        vertical_layout: &VerticalLayoutMap,
+        presentations: &[crate::input::LinePresentation],
         viewport: Pixels,
         window: &mut Window,
         cx: &mut App,
     ) -> std::collections::HashMap<usize, AnyElement> {
         let style = window.text_style();
         let state = self.state.read(cx);
+        let presentation_key = presentations.iter().fold(0u64, |hash, presentation| {
+            hash.rotate_left(7)
+                ^ u64::from(f32::from(presentation.font_size).to_bits())
+                ^ u64::from(f32::from(presentation.line_height).to_bits()).rotate_left(13)
+                ^ u64::from(f32::from(presentation.spacing_before).to_bits()).rotate_left(29)
+                ^ u64::from(f32::from(presentation.spacing_after).to_bits()).rotate_left(43)
+        });
         let key = (
             style.font(),
             style.font_size.to_pixels(window.rem_size()),
             width,
             line_height,
             state.is_single_line() || !state.soft_wrap,
+            presentation_key,
         );
         if !state.tokens_visible() {
             if state.token_layout_cache.is_none() {
@@ -1634,9 +1644,9 @@ impl<M: InputModeKind> TextElement<M> {
                 || state
                     .token_spans()
                     .iter()
-                    .any(|span| !cache.widths.contains_key(span.token()))
+                    .any(|span| !cache.widths.contains_key(&span.range().start))
         });
-        let (visible, _, _) = self.calculate_visible_range(state, line_height, viewport);
+        let (visible, _, _) = self.calculate_visible_range(state, vertical_layout, viewport);
         let start = state.text.line_start_offset(visible.start);
         let end = state.text.line_end_offset(visible.end.saturating_sub(1));
         let spans = state.token_spans();
@@ -1652,10 +1662,18 @@ impl<M: InputModeKind> TextElement<M> {
                 let range = span.range();
                 (range.start <= end && range.end >= start)
                     || cache.is_none_or(|cache| {
-                        cache.key.as_ref() != Some(&key) || !cache.widths.contains_key(span.token())
+                        cache.key.as_ref() != Some(&key)
+                            || !cache.widths.contains_key(&span.range().start)
                     })
             })
-            .map(|span| state.token_context(span, line_height, width))
+            .map(|span| {
+                let row = state.text.offset_to_point(span.range().start).row;
+                let token_line_height = presentations
+                    .get(row)
+                    .map(|presentation| presentation.line_height)
+                    .unwrap_or(line_height);
+                state.token_context(span, token_line_height, width)
+            })
             .collect();
         let mut elements = std::collections::HashMap::new();
         let mut measured = Vec::new();
@@ -1664,36 +1682,36 @@ impl<M: InputModeKind> TextElement<M> {
             let size = element.layout_as_root(
                 size(
                     gpui::AvailableSpace::MaxContent,
-                    gpui::AvailableSpace::Definite(line_height),
+                    gpui::AvailableSpace::Definite(token.line_height()),
                 ),
                 window,
                 cx,
             );
-            measured.push((token.token().clone(), size.width.min(width).max(px(1.))));
+            measured.push((token.range().start, size.width.min(width).max(px(1.))));
             elements.insert(token.range().start, element);
         }
         self.state.update(cx, |state, cx| {
             let mut cache = state.token_layout_cache.take().unwrap_or_default();
             let mut changed = cache.key.as_ref() != Some(&key) || cache.revision != revision;
-            if cache.key.as_ref() != Some(&key) {
+            if cache.key.as_ref() != Some(&key) || cache.revision != revision {
                 cache.widths.clear();
             }
-            for (token, width) in measured {
-                changed |= cache.widths.get(&token) != Some(&width);
-                cache.widths.insert(token, width);
+            for (start, width) in measured {
+                changed |= cache.widths.get(&start) != Some(&width);
+                cache.widths.insert(start, width);
             }
             cache.key = Some(key);
             if changed {
                 let spans = state.token_spans();
-                let tokens: std::collections::HashSet<_> =
-                    spans.iter().map(|s| s.token()).collect();
-                cache.widths.retain(|token, _| tokens.contains(token));
+                let token_starts: std::collections::HashSet<_> =
+                    spans.iter().map(|span| span.range().start).collect();
+                cache.widths.retain(|start, _| token_starts.contains(start));
                 cache.metrics = spans
                     .iter()
                     .filter_map(|span| {
                         cache
                             .widths
-                            .get(span.token())
+                            .get(&span.range().start)
                             .map(|width| (span.range(), *width))
                     })
                     .collect();
@@ -1729,8 +1747,11 @@ impl<M: InputModeKind> TextElement<M> {
                                         None,
                                     )
                                     .width;
-                                width +=
-                                    cache.widths.get(span.token()).copied().unwrap_or_default();
+                                width += cache
+                                    .widths
+                                    .get(&span.range().start)
+                                    .copied()
+                                    .unwrap_or_default();
                                 offset = local.end;
                             }
                             let part = &text[offset..];
@@ -1766,7 +1787,7 @@ impl<M: InputModeKind> TextElement<M> {
     fn layout_token_lines(
         state: &InputBaseState<M>,
         last_layout: &LastLayout,
-        font_size: Pixels,
+        _font_size: Pixels,
         runs: &[TextRun],
         window: &mut Window,
     ) -> Vec<LineLayout> {
@@ -1780,7 +1801,11 @@ impl<M: InputModeKind> TextElement<M> {
         last_layout
             .visible_buffer_lines
             .iter()
-            .map(|&row| {
+            .enumerate()
+            .map(|(visible_index, &row)| {
+                let font_size = last_layout
+                    .presentation_for_visible_index(visible_index)
+                    .font_size;
                 let line_start = state.text.line_start_offset(row);
                 let text: String = state.text.slice_line(row).into();
                 let ranges = if state.is_single_line() {
@@ -1822,7 +1847,11 @@ impl<M: InputModeKind> TextElement<M> {
                             });
                             x += width;
                         }
-                        let width = cache.widths.get(span.token()).copied().unwrap_or_default();
+                        let width = cache
+                            .widths
+                            .get(&span.range().start)
+                            .copied()
+                            .unwrap_or_default();
                         fragments.push(InlineFragment {
                             range: local.start - range.start..local.end - range.start,
                             x,
@@ -1888,21 +1917,29 @@ impl<M: InputModeKind> TextElement<M> {
         let mut placements = Vec::new();
         let mut y = layout.visible_top;
         for (ix, &row) in layout.visible_buffer_lines.iter().enumerate() {
+            let presentation = layout.presentation_for_visible_index(ix);
             let start = state.text.line_start_offset(row);
             let end = state.text.line_end_offset(row);
             let spans = state.token_spans();
             let first = spans.partition_point(|s| s.range().end <= start);
             for span in spans[first..].iter().take_while(|s| s.range().start < end) {
-                if let Some(position) =
-                    layout.lines[ix].position_for_index(span.range().start - start, layout, false)
-                {
+                if let Some(position) = layout.lines[ix].position_for_index_with_line_height(
+                    span.range().start - start,
+                    layout,
+                    presentation.line_height,
+                    false,
+                ) {
                     placements.push((
-                        state.token_context(span, layout.line_height, width),
-                        bounds.origin + position + point(layout.line_number_width, y),
+                        state.token_context(span, presentation.line_height, width),
+                        bounds.origin
+                            + position
+                            + point(layout.line_number_width, y + presentation.spacing_before),
                     ));
                 }
             }
-            y += layout.lines[ix].size(layout.line_height).height;
+            y += presentation.spacing_before
+                + layout.lines[ix].size(presentation.line_height).height
+                + presentation.spacing_after;
         }
         placements
             .into_iter()
@@ -1912,7 +1949,7 @@ impl<M: InputModeKind> TextElement<M> {
                     element.layout_as_root(
                         size(
                             gpui::AvailableSpace::MaxContent,
-                            gpui::AvailableSpace::Definite(layout.line_height),
+                            gpui::AvailableSpace::Definite(token.line_height()),
                         ),
                         window,
                         cx,
@@ -1930,7 +1967,7 @@ impl<M: InputModeKind> TextElement<M> {
         state: &InputBaseState<M>,
         display_text: &Rope,
         last_layout: &LastLayout,
-        _font_size: Pixels,
+        font_size: Pixels,
         runs: &[TextRun],
         bg_segments: &[(Range<usize>, Hsla)],
         whitespace_indicators: Option<WhitespaceIndicators>,
@@ -2427,10 +2464,15 @@ impl<M: InputModeKind> Element for TextElement<M> {
             });
         }
 
+        let state = self.state.read(cx);
         let line_height = window.line_height();
+        let provisional_presentations = Self::line_presentations(&state, text_size, line_height);
+        let provisional_vertical_layout = Self::vertical_layout(&state, &provisional_presentations);
         let token_elements = self.measure_tokens(
             (bounds.size.width - line_number_width - RIGHT_MARGIN).max(px(1.)),
             line_height,
+            &provisional_vertical_layout,
+            &provisional_presentations,
             bounds.size.height,
             window,
             cx,
@@ -2491,6 +2533,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             visible_range_offset,
             line_height,
             line_presentations: Rc::new(visible_presentations),
+            all_line_presentations: Rc::new(all_line_presentations),
             vertical_layout,
             wrap_width,
             wrapping_indent,

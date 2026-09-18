@@ -2558,14 +2558,14 @@ impl<M: InputModeKind> InputBaseState<M> {
             .visible_buffer_lines
             .iter()
             .position(|line| *line == row);
-        let presentation = last_layout
-            .presentation_for_buffer_line(row)
-            .unwrap_or(crate::input::LinePresentation {
+        let presentation = last_layout.presentation_for_buffer_line(row).unwrap_or(
+            crate::input::LinePresentation {
                 font_size: line_height,
                 line_height,
                 spacing_before: px(0.),
                 spacing_after: px(0.),
-            });
+            },
+        );
 
         // Resolve the wrapped row even when the target is outside the shaped
         // visible range. Variable-height lines still share one presentation
@@ -4545,6 +4545,75 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[gpui::test]
+    fn test_inline_tokens_receive_their_presented_line_height(cx: &mut TestAppContext) {
+        use crate::input::{
+            InlineToken, InlineTokenPresentation, InputPresentationDecorator, LinePresentation,
+        };
+        use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
+        struct HeadingPresentation;
+        impl InputPresentationDecorator for HeadingPresentation {
+            fn line_presentation(
+                &self,
+                line: usize,
+                mut default: LinePresentation,
+            ) -> LinePresentation {
+                if line == 0 {
+                    default.font_size = px(24.);
+                    default.line_height = px(36.);
+                    default.spacing_before = px(8.);
+                    default.spacing_after = px(4.);
+                }
+                default
+            }
+        }
+
+        let measured = Rc::new(RefCell::new(HashMap::new()));
+        let measured_by_renderer = measured.clone();
+        let view = InputView::build_textarea(cx, |state| {
+            state.rows(4).default_value("# Title @a\nbody @b")
+        });
+        view.window_handle
+            .update(cx, |_, window, cx| {
+                view.input.update(cx, |state, cx| {
+                    state
+                        .replace_range_with_token(
+                            8..10,
+                            InlineToken::new("heading", "@a"),
+                            window,
+                            cx,
+                        )
+                        .unwrap();
+                    state
+                        .replace_range_with_token(
+                            16..18,
+                            InlineToken::new("body", "@b"),
+                            window,
+                            cx,
+                        )
+                        .unwrap();
+                    state.set_presentation_decorator(Some(Rc::new(HeadingPresentation)), cx);
+                    state.set_token_presentation(InlineTokenPresentation::default().token(
+                        move |token, _, _| {
+                            measured_by_renderer
+                                .borrow_mut()
+                                .insert(token.token().id().to_string(), token.line_height());
+                            div().w(px(40.)).h(token.line_height())
+                        },
+                    ));
+                });
+            })
+            .unwrap();
+
+        let mut visual = VisualTestContext::from_window(view.window_handle.into(), cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let measured = measured.borrow();
+        assert_eq!(measured.get("heading"), Some(&px(36.)));
+        assert!(measured["heading"] > measured["body"]);
+    }
+
     #[gpui::test]
     fn test_inline_token_wrap_and_size_refresh(cx: &mut TestAppContext) {
         use crate::input::{InlineToken, InlineTokenPresentation};

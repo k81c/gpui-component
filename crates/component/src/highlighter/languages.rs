@@ -424,7 +424,7 @@ impl Language {
             ),
             #[cfg(feature = "tree-sitter-asciidoc")]
             Self::AsciiDoc => {
-                return LanguageConfig::new(
+                return GrammarConfig::new(
                     self.name(),
                     tree_sitter_asciidoc::language(),
                     self.injection_languages(),
@@ -438,7 +438,7 @@ impl Language {
                 feature = "tree-sitter-asciidoc-inline"
             ))]
             Self::AsciiDocInline => {
-                return LanguageConfig::new(
+                return GrammarConfig::new(
                     self.name(),
                     tree_sitter_asciidoc_inline::language(),
                     self.injection_languages(),
@@ -449,7 +449,7 @@ impl Language {
             }
             #[cfg(feature = "tree-sitter-djot")]
             Self::Djot => {
-                return LanguageConfig::new(
+                return GrammarConfig::new(
                     self.name(),
                     tree_sitter_djot::language(),
                     self.injection_languages(),

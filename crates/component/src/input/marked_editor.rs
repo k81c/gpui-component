@@ -19,7 +19,8 @@ use crate::{IconName, StyledExt as _};
 use super::table_format;
 use super::{Editor, EditorState};
 use gpui_base::input::{
-    BackgroundSpan, HighlightStyleResolver as _, InputPresentationDecorator, LinePresentation,
+    BackgroundSpan, HighlightStyleResolver as _, InputContent, InputPresentationDecorator,
+    LinePresentation,
 };
 
 /// Options controlling a [`MarkedEditorState`].
@@ -120,12 +121,23 @@ impl MarkedEditorState {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        let value = value.into();
+        self.set_content(InputContent::new(value.into()), window, cx);
+    }
+
+    /// Replace the document while preserving any atomic inline tokens attached
+    /// to it. Like [`Self::set_value`], this resets the editor history.
+    pub fn set_content(
+        &mut self,
+        content: InputContent,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let value = content.text().clone();
         self.presentation
             .borrow_mut()
             .rebuild(&value, self.options.language.as_ref(), None);
         self.editor.update(cx, |editor, cx| {
-            editor.set_value(value, window, cx);
+            editor.set_value(content, window, cx);
         });
     }
 

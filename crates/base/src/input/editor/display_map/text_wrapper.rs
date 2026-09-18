@@ -1402,6 +1402,12 @@ mod tests {
                 spacing_before: px(0.),
                 spacing_after: px(0.),
             }]),
+            all_line_presentations: Rc::new(vec![crate::input::LinePresentation {
+                font_size: line_height,
+                line_height,
+                spacing_before: px(0.),
+                spacing_after: px(0.),
+            }]),
             vertical_layout: crate::input::layout::VerticalLayoutMap::new(vec![line_height]),
             wrap_width: None,
             wrapping_indent: WrappingIndent::default(),
@@ -1705,6 +1711,12 @@ mod tests {
             lines: Rc::new(vec![]),
             line_height: px(20.0),
             line_presentations: Rc::new(vec![crate::input::LinePresentation {
+                font_size: px(20.),
+                line_height: px(20.),
+                spacing_before: px(0.),
+                spacing_after: px(0.),
+            }]),
+            all_line_presentations: Rc::new(vec![crate::input::LinePresentation {
                 font_size: px(20.),
                 line_height: px(20.),
                 spacing_before: px(0.),
