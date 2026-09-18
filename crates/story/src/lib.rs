@@ -735,6 +735,7 @@ impl StoryState {
             "InputStory" => story!(InputStory),
             "ListStory" => story!(ListStory),
             "MarkerStory" => story!(MarkerStory),
+            "MarkedEditorStory" => story!(MarkedEditorStory),
             "MessageStory" => story!(MessageStory),
             "MessageScrollerStory" => story!(MessageScrollerStory),
             "DialogStory" => story!(DialogStory),
