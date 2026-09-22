@@ -1,19 +1,17 @@
-use gpui::{
-    Action, Anchor, App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, Half, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement as _,
-    Render, Styled as _, WeakEntity, Window, actions, div, px,
-};
-use gpui_component::{
+use gpui_kit::component::{
     ActiveTheme, StyledExt, WindowExt,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
     list::{List, ListDelegate, ListItem, ListState},
+    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     popover::Popover,
     separator::Separator,
     v_flex,
 };
+use gpui_kit::*;
 use serde::Deserialize;
+use std::time::Duration;
 
 use crate::section;
 
@@ -77,7 +75,7 @@ impl ListDelegate for DropdownListDelegate {
 
     fn render_item(
         &mut self,
-        ix: gpui_component::IndexPath,
+        ix: gpui_kit::component::IndexPath,
         _: &mut Window,
         _: &mut Context<ListState<Self>>,
     ) -> Option<Self::Item> {
@@ -86,9 +84,9 @@ impl ListDelegate for DropdownListDelegate {
 
     fn set_selected_index(
         &mut self,
-        _: Option<gpui_component::IndexPath>,
+        _: Option<gpui_kit::component::IndexPath>,
         _: &mut Window,
-        _: &mut Context<gpui_component::list::ListState<Self>>,
+        _: &mut Context<gpui_kit::component::list::ListState<Self>>,
     ) {
     }
 
@@ -149,7 +147,7 @@ impl super::Story for PopoverStory {
     }
 
     fn description() -> &'static str {
-        "A popup displays content on top of the main page."
+        "Show focused content beside a trigger."
     }
 
     fn new_view(window: &mut Window, cx: &mut App) -> Entity<impl Render> {
@@ -236,111 +234,162 @@ impl Render for PopoverStory {
             .size_full()
             .gap_6()
             .child(
-                section("Basic Popover").child(
-                    Popover::new("popover-0")
-                        .max_w(px(600.))
-                        .trigger(Button::new("btn").outline().label("Popover"))
-                        .gap_2()
-                        .text_sm()
-                        .w(px(400.))
-                        .child("Hello, this is a Popover.")
-                        .child(Separator::horizontal())
-                        .child(
-                            "You can put any content here, including text,\
+                section("Default")
+                    .description("Display lightweight contextual content.")
+                    .child(
+                        Popover::new("popover-0")
+                            .max_w(px(600.))
+                            .trigger(Button::new("btn").outline().label("Popover"))
+                            .gap_2()
+                            .text_sm()
+                            .w(px(400.))
+                            .child("Hello, this is a Popover.")
+                            .child(Separator::horizontal())
+                            .child(
+                                "You can put any content here, including text,\
                             buttons, forms, and more.",
-                        ),
-                ),
+                            ),
+                    )
+                    .child(
+                        Popover::new("default-open-popover")
+                            .default_open(true)
+                            .trigger(
+                                Button::new("default-open-btn")
+                                    .label("Default Open")
+                                    .outline(),
+                            )
+                            .child("This popover is open by default when first rendered."),
+                    ),
             )
             .child(
-                section("Popover with Form").child(
-                    Popover::new("popover-form")
-                        .p_0()
-                        .text_sm()
-                        .trigger(Button::new("pop").outline().label("Popup Form"))
-                        .track_focus(&form.focus_handle(cx))
-                        .open(self.form_popover_open)
-                        .on_open_change(cx.listener(move |this, open, _, cx| {
-                            println!("Popover form open changed: {}", open);
-                            this.form_popover_open = *open;
-                            cx.notify();
-                        }))
-                        .child(form.clone()),
-                ),
+                section("Form")
+                    .description("Keep focus and controlled open state around a form.")
+                    .child(
+                        Popover::new("popover-form")
+                            .p_0()
+                            .text_sm()
+                            .trigger(Button::new("pop").outline().label("Popup Form"))
+                            .track_focus(&form.focus_handle(cx))
+                            .open(self.form_popover_open)
+                            .on_open_change(cx.listener(move |this, open, _, cx| {
+                                println!("Popover form open changed: {}", open);
+                                this.form_popover_open = *open;
+                                cx.notify();
+                            }))
+                            .child(form.clone()),
+                    ),
             )
             .child(
-                section("Popover with List").child(
-                    Popover::new("popover-list")
-                        .p_0()
-                        .text_sm()
-                        .open(self.list_popover_open)
-                        .on_open_change(cx.listener(move |this, open, _, cx| {
-                            this.list_popover_open = *open;
-                            cx.notify();
-                        }))
-                        .trigger(Button::new("pop").outline().label("Popup List"))
-                        .track_focus(&self.list.focus_handle(cx))
-                        .child(List::new(&self.list))
-                        .w_64()
-                        .h(px(200.)),
-                ),
+                section("List")
+                    .description("Place a scrollable selection list in the popover.")
+                    .child(
+                        Popover::new("popover-list")
+                            .p_0()
+                            .text_sm()
+                            .open(self.list_popover_open)
+                            .on_open_change(cx.listener(move |this, open, _, cx| {
+                                this.list_popover_open = *open;
+                                cx.notify();
+                            }))
+                            .trigger(Button::new("pop").outline().label("Popup List"))
+                            .track_focus(&self.list.focus_handle(cx))
+                            .child(List::new(&self.list))
+                            .w_64()
+                            .h(px(200.)),
+                    ),
             )
             .child(
-                section("Right click to open Popover").child(
-                    Popover::new("popover-right-click")
-                        .mouse_button(MouseButton::Right)
-                        .trigger(Button::new("btn").outline().label("Right Click Popover"))
-                        .max_w(px(600.))
-                        .content(|_, _, cx| {
-                            v_flex()
-                                .gap_2()
-                                .child("Hello, this is a Popover on the Bottom Right.")
-                                .child(Separator::horizontal())
-                                .child(
-                                    Button::new("info1")
-                                        .primary()
-                                        .label("Dismiss")
-                                        .w(px(80.))
-                                        .on_click(cx.listener(|_, _, window, cx| {
-                                            window.push_notification(
-                                                "You have clicked dismiss via DismissEvent.",
-                                                cx,
-                                            );
-                                            cx.emit(DismissEvent);
-                                        })),
-                                )
-                        }),
-                ),
+                section("Right click")
+                    .description("Open from the secondary mouse button.")
+                    .child(
+                        Popover::new("popover-right-click")
+                            .mouse_button(MouseButton::Right)
+                            .trigger(Button::new("btn").outline().label("Right Click Popover"))
+                            .max_w(px(600.))
+                            .content(|_, _, cx| {
+                                v_flex()
+                                    .gap_2()
+                                    .child("Hello, this is a Popover on the Bottom Right.")
+                                    .child(Separator::horizontal())
+                                    .child(
+                                        Button::new("info1")
+                                            .primary()
+                                            .label("Dismiss")
+                                            .w(px(80.))
+                                            .on_click(cx.listener(|_, _, window, cx| {
+                                                window.push_notification(
+                                                    "You have clicked dismiss via DismissEvent.",
+                                                    cx,
+                                                );
+                                                cx.emit(DismissEvent);
+                                            })),
+                                    )
+                            }),
+                    ),
             )
             .child(
-                section("Styling Popover").child(
-                    Popover::new("popover-1")
-                        .trigger(Button::new("btn").outline().label("Style Popover"))
-                        .appearance(false)
-                        .py_1()
-                        .px_2()
-                        .bg(cx.theme().primary)
-                        .text_color(cx.theme().primary_foreground)
-                        .max_w(px(600.))
-                        .rounded(cx.theme().radius.half())
-                        .text_sm()
-                        .shadow_2xl()
-                        .child("A styled Popover with custom background and text color."),
-                ),
+                section("Custom style")
+                    .description("Customize appearance, radius, and shadow.")
+                    .child(
+                        Popover::new("popover-1")
+                            .trigger(Button::new("btn").outline().label("Style Popover"))
+                            .appearance(false)
+                            .py_1()
+                            .px_2()
+                            .bg(cx.theme().primary)
+                            .text_color(cx.theme().primary_foreground)
+                            .max_w(px(600.))
+                            .rounded(cx.theme().radius.half())
+                            .text_sm()
+                            .shadow_2xl()
+                            .child("A styled Popover with custom background and text color."),
+                    ),
             )
             .child(
-                section("Default Open").child(
-                    Popover::new("default-open-popover")
-                        .default_open(true)
-                        .trigger(
-                            Button::new("default-open-btn")
-                                .label("Default Open")
-                                .outline(),
-                        )
-                        .child("This popover is open by default when first rendered."),
-                ),
+                section("Async submenu")
+                    .description("Rebuild submenu content after asynchronous loading.")
+                    .child(
+                        Button::new("async-menu")
+                            .outline()
+                            .label("Async Menu")
+                            .dropdown_menu(|menu, window, cx| {
+                                // The submenu is attached as a plain menu value, its
+                                // content is loaded asynchronously via `rebuild`.
+                                let submenu = PopupMenu::build(window, cx, |menu, _, _| {
+                                    menu.label("Loading...")
+                                });
+
+                                cx.spawn_in(window, {
+                                    let submenu = submenu.clone();
+                                    async move |_, cx| {
+                                        cx.background_executor()
+                                            .timer(Duration::from_secs(1))
+                                            .await;
+                                        _ = submenu.update_in(cx, |menu, window, cx| {
+                                            menu.rebuild(window, cx, |menu, _, _| {
+                                                (1..=3).fold(menu, |menu, ix| {
+                                                    menu.menu(
+                                                        format!("Loaded Item {}", ix),
+                                                        Box::new(Info(ix)),
+                                                    )
+                                                })
+                                            });
+                                        });
+                                    }
+                                })
+                                .detach();
+
+                                menu.menu("Copy", Box::new(Copy))
+                                    .separator()
+                                    .item(PopupMenuItem::submenu("Async Submenu", submenu))
+                            }),
+                    )
+                    .child(self.message.clone()),
             )
             .child(
-                section("Popover Anchor")
+                section("Anchor")
+                    .description("Position content from each edge of the trigger.")
+                    .w_full()
                     .min_h(px(360.))
                     .v_flex()
                     .child(
@@ -353,20 +402,20 @@ impl Render for PopoverStory {
                                         .max_w(px(600.))
                                         .anchor(Anchor::TopLeft)
                                         .trigger(Button::new("btn").outline().label("TopLeft"))
-                                        .child("This is a Popover on the Top Left."),
+                                        .child("Anchored to the trigger's top-left."),
                                 )
                                 .child(
                                     Popover::new("anchor-top-center")
                                         .max_w(px(600.))
                                         .anchor(Anchor::TopCenter)
                                         .trigger(Button::new("btn").outline().label("TopCenter"))
-                                        .child("This is a Popover on the Top Center."),
+                                        .child("Anchored to the trigger's top-center."),
                                 )
                                 .child(
                                     Popover::new("anchor-top-right")
                                         .anchor(Anchor::TopRight)
                                         .trigger(Button::new("btn").outline().label("TopRight"))
-                                        .child("This is a Popover on the Top Right."),
+                                        .child("Anchored to the trigger's top-right."),
                                 ),
                         ),
                     )
@@ -379,19 +428,19 @@ impl Render for PopoverStory {
                                     Popover::new("anchor-bottom-left")
                                         .trigger(Button::new("btn").outline().label("BottomLeft"))
                                         .anchor(Anchor::BottomLeft)
-                                        .child("This is a Popover on the Bottom Left."),
+                                        .child("Anchored to the trigger's bottom-left."),
                                 )
                                 .child(
                                     Popover::new("anchor-bottom-center")
                                         .trigger(Button::new("btn").outline().label("BottomCenter"))
                                         .anchor(Anchor::BottomCenter)
-                                        .child("This is a Popover on the Bottom Center."),
+                                        .child("Anchored to the trigger's bottom-center."),
                                 )
                                 .child(
                                     Popover::new("anchor-bottom-right")
                                         .anchor(Anchor::BottomRight)
                                         .trigger(Button::new("btn").outline().label("BottomRight"))
-                                        .child("This is a Popover on the Bottom Right."),
+                                        .child("Anchored to the trigger's bottom-right."),
                                 ),
                         ),
                     ),

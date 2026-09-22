@@ -7,7 +7,7 @@ description: Create new GPUI components. Use when building components, writing U
 
 When creating new GPUI components:
 
-1. **Follow existing patterns**: Base implementation on components in `crates/ui/src` (examples: `Button`, `Select`, `Dialog`)
+1. **Follow existing patterns**: Base implementation on components in `crates/component/src` (examples: `Button`, `Select`, `Dialog`)
 2. **Style consistency**: Follow existing component styles and Shadcn UI patterns
 3. **Component type decision**:
    - Use stateless elements for simple components (like `Button`)
@@ -16,7 +16,7 @@ When creating new GPUI components:
 4. **API consistency**: Maintain the same API style as other elements
 5. **Documentation**: Create component documentation
 6. **Stories**: Write component stories in the story folder
-7. **Registration**: Add the component to `crates/story/src/main.rs` story list
+7. **Registration**: Export the story from `crates/story/src/stories/mod.rs`, add it to `crates/story/src/gallery.rs`, and add persistent restoration in `crates/story/src/lib.rs`
 
 ## Component Types
 
@@ -28,7 +28,7 @@ When creating new GPUI components:
 
 ### 1. Create Component File
 
-Create a new file in `crates/ui/src/` (e.g., `alert_dialog.rs`):
+Create a new file in `crates/component/src/` (e.g., `alert_dialog.rs`):
 
 ```rust
 use gpui::{App, ClickEvent, Pixels, SharedString, Window, px};
@@ -54,7 +54,7 @@ impl AlertDialog {
 
 ### 2. Register in lib.rs
 
-Add the module to `crates/ui/src/lib.rs`:
+Add the module to `crates/component/src/lib.rs`:
 
 ```rust
 pub mod alert_dialog;
@@ -99,7 +99,7 @@ mod alert_dialog_story;
 pub use alert_dialog_story::AlertDialogStory;
 ```
 
-Add to `crates/story/src/main.rs` in the stories list:
+Add to `crates/story/src/gallery.rs` in the stories list, and add the story class to the restoration match in `crates/story/src/lib.rs`:
 
 ```rust
 vec![
@@ -206,7 +206,7 @@ Key points:
 - Implement `Styled` trait returning `&mut self.style`
 - In `render()`, call `.refine_style(&self.style)` on the root div to merge user styles
 - Place `.refine_style()` after component defaults but before `.children()` so user styles override defaults
-- Reference: `crates/ui/src/dialog/header.rs` (DialogHeader), `crates/ui/src/table/table.rs` (Table and sub-components)
+- Reference: `crates/component/src/dialog/header.rs` (DialogHeader), `crates/component/src/table/table.rs` (Table and sub-components)
 
 ### Callbacks
 Use `Rc<dyn Fn>` for callbacks that may be called multiple times:

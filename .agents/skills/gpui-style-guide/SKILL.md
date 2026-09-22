@@ -7,7 +7,7 @@ description: GPUI Component project style guide based on gpui-component code pat
 
 Code style guide derived from gpui-component implementation patterns.
 
-**Based on**: Analysis of Button, Checkbox, Input, Select, and other components in crates/ui
+**Based on**: Analysis of Button, Checkbox, Input, Select, and other components in `crates/component`
 
 ## Component Structure
 
@@ -539,7 +539,7 @@ div()
 
 ## Quick Checklist
 
-When creating a new component in crates/ui:
+When creating a new component in `crates/component`:
 
 - [ ] `#[derive(IntoElement)]` on struct
 - [ ] Include `id: ElementId`, `base: Div`, `style: StyleRefinement`

@@ -8,6 +8,7 @@ pub fn embedded_themes() -> HashMap<&'static str, &'static str> {
     themes.insert("adventure", include_str!("../../../themes/adventure.json"));
     themes.insert("alduin", include_str!("../../../themes/alduin.json"));
     themes.insert("asciinema", include_str!("../../../themes/asciinema.json"));
+    themes.insert("aurora", include_str!("../../../themes/aurora.json"));
     themes.insert("ayu", include_str!("../../../themes/ayu.json"));
     themes.insert(
         "catppuccin",
@@ -34,7 +35,6 @@ pub fn embedded_themes() -> HashMap<&'static str, &'static str> {
         "macos-classic",
         include_str!("../../../themes/macos-classic.json"),
     );
-    themes.insert("matrix", include_str!("../../../themes/matrix.json"));
     themes.insert(
         "mellifluous",
         include_str!("../../../themes/mellifluous.json"),

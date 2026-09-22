@@ -8,10 +8,12 @@ GPUI Component is a UI component library for building desktop applications using
 
 This is a Rust workspace project with the following main crates:
 
-- `crates/ui` - Core UI component library (published as `gpui-component`)
+- `crates/base` - Shared primitives and the text-input/editor engine (published as `gpui-base`)
+- `crates/component` - Styled component library (published as `gpui-component`)
+- `crates/kit` - Application-facing facade over GPUI, base, components, and assets (published as `gpui-kit`)
 - `crates/story` - Gallery application for showcasing and testing components
 - `crates/story-web` - Web version of the story gallery (using WebAssembly)
-- `crates/macros` - Procedural macros (`IntoPlot` derive)
+- `crates/component-macros` - Procedural macros (`IntoPlot` derive)
 - `crates/assets` - Static assets
 - `crates/webview` - WebView component support
 - `examples/` - Various example applications
@@ -46,7 +48,7 @@ cargo machete
 
 ### Testing
 
-**Note**: Per user configuration, tests do not need to be run.
+**Note**: A full workspace test run is not required by default. Run focused tests for the code paths changed.
 
 ```bash
 # Run all tests
@@ -170,11 +172,11 @@ Text input system based on Rope data structure:
 The `Icon` element does not include SVG files by default. You need to:
 
 - Use [Lucide](https://lucide.dev) or other icon libraries
-- Name SVG files according to the `IconName` enum definition (located in `crates/ui/src/icon.rs`)
+- Name SVG files according to the `IconName` enum definition (located in `crates/component/src/icon.rs`)
 
 ## Dependencies
 
-- GPUI: Git version from Zed repository
+- GPUI: the matching `gpui-pre` crate family pinned in the workspace manifest
 - Tree-sitter: For syntax highlighting
 - Ropey: Rope data structure for text, and `RopeExt` trait with more features.
 - Markdown rendering: `markdown` crate
@@ -186,7 +188,7 @@ The `Icon` element does not include SVG files by default. You need to:
 
 Uses `rust-i18n` crate.
 
-- Localization files are located in `crates/ui/locales/`.
+- Localization files are located in `crates/component/locales/`.
 - Only add `en`, `zh-CN`, `zh-HK` by default.
 
 ## Documentation
@@ -205,7 +207,7 @@ CI runs full test suite on each platform.
 
 ## Skills Reference
 
-This project has custom Codex skills in `.Codex/skills/` to assist with common development tasks:
+This project has custom Codex skills in `.agents/skills/` to assist with common development tasks:
 
 ### Component Development Skills
 

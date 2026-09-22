@@ -1,11 +1,11 @@
-use gpui::{
+use gpui_kit::{
     App, AppContext, Axis, Context, Element, Entity, FocusHandle, Focusable, Global, IntoElement,
     ParentElement as _, Render, SharedString, Styled, Window, prelude::FluentBuilder, px,
 };
 
-use gpui_component::{
+use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable, Size, Theme, ThemeMode,
-    button::Button,
+    button::{Button, ButtonVariants},
     group_box::GroupBoxVariant,
     h_flex,
     label::Label,
@@ -23,6 +23,9 @@ struct AppSettings {
     font_family: SharedString,
     font_size: f64,
     line_height: f64,
+    /// Demonstrates a custom element field driving its own state, with reset
+    /// support wired up via [`SettingField::on_reset`].
+    density: SharedString,
     notifications_enabled: bool,
     auto_update: bool,
     resettable: bool,
@@ -37,6 +40,7 @@ impl Default for AppSettings {
             font_family: "Arial".into(),
             font_size: 14.0,
             line_height: 12.0,
+            density: "Comfortable".into(),
             notifications_enabled: true,
             auto_update: true,
             resettable: true,
@@ -84,7 +88,7 @@ impl SettingFieldElement for OpenURLSettingField {
         Button::new("open-url")
             .outline()
             .label(self.label.clone())
-            .with_size(options.size)
+            .with_size(options.size())
             .on_click(move |_, _window, cx| {
                 cx.open_url(url.as_str());
             })
@@ -104,7 +108,7 @@ impl super::Story for SettingsStory {
         Self::view(window, cx)
     }
 
-    fn paddings() -> gpui::Pixels {
+    fn paddings() -> gpui_kit::Pixels {
         px(0.)
     }
 }
@@ -135,6 +139,13 @@ impl SettingsStory {
                 .resettable(resettable)
                 .default_open(true)
                 .icon(Icon::new(IconName::Settings2))
+                .title_suffix(|_, _| {
+                    Button::new("help")
+                        .icon(IconName::Info)
+                        .ghost()
+                        .xsmall()
+                        .on_click(|_, _, cx| cx.open_url("https://gpui-kit.com/"))
+                })
                 .groups(vec![
                     SettingGroup::new().title("Appearance").items(vec![
                         SettingItem::new(
@@ -314,29 +325,81 @@ impl SettingsStory {
                             .default_value(false),
                         )
                         .description("Lock the other settings."),
+                        SettingItem::new(
+                            "Foo",
+                            SettingField::switch(
+                                |cx: &App| AppSettings::global(cx).disabled,
+                                |checked: bool, cx: &mut App| {
+                                    AppSettings::global_mut(cx).disabled = checked
+                                },
+                            )
+                            .default_value(false),
+                        )
+                        .description("Find me by searching for my sibling")
+                        .keywords(["Bar"]),
                         SettingItem::render(|options, _, _| {
                             h_flex()
                                 .w_full()
                                 .justify_between()
                                 .flex_wrap()
                                 .gap_3()
-                                .child("This is a custom element item by use SettingItem::element.")
-                                .when(options.disabled, |this| this.opacity(0.5))
+                                .child("View source, report issues, and follow project updates.")
+                                .when(options.is_disabled(), |this| this.opacity(0.5))
                                 .child(
                                     Button::new("action")
                                         .icon(IconName::Globe)
                                         .label("Repository...")
                                         .outline()
-                                        .with_size(options.size)
-                                        .disabled(options.disabled)
+                                        .with_size(options.size())
+                                        .disabled(options.is_disabled())
                                         .on_click(|_, _, cx| {
-                                            cx.open_url(
-                                                "https://github.com/longbridge/gpui-component",
-                                            );
+                                            cx.open_url("https://github.com/longbridge/gpui-kit");
                                         }),
                                 )
                                 .into_any_element()
                         })
+                        .disabled(disabled),
+                        SettingItem::new(
+                            "Density",
+                            SettingField::render(|options, _window, cx| {
+                                let current = AppSettings::global(cx).density.clone();
+                                h_flex()
+                                    .gap_1()
+                                    .children(["Comfortable", "Compact"].map(|value| {
+                                        Button::new(value)
+                                            .label(value)
+                                            .with_size(options.size())
+                                            .map(|this| {
+                                                if current == value {
+                                                    this.primary()
+                                                } else {
+                                                    this.outline()
+                                                }
+                                            })
+                                            .on_click(move |_, _, cx| {
+                                                AppSettings::global_mut(cx).density = value.into();
+                                            })
+                                    }))
+                            })
+                            // A custom element field manages its own state, so reset
+                            // support must be wired up explicitly via `on_reset`.
+                            .on_reset(
+                                {
+                                    let default_density = default_settings.density.clone();
+                                    move |cx: &App| {
+                                        AppSettings::global(cx).density != default_density
+                                    }
+                                },
+                                {
+                                    let default_density = default_settings.density.clone();
+                                    move |_window, cx: &mut App| {
+                                        AppSettings::global_mut(cx).density =
+                                            default_density.clone();
+                                    }
+                                },
+                            ),
+                        )
+                        .description("A custom element field with reset support via `on_reset`.")
                         .disabled(disabled),
                         SettingItem::new(
                             "CLI Path",
@@ -415,7 +478,7 @@ impl SettingsStory {
                             "GitHub Repository",
                             SettingField::element(OpenURLSettingField::new(
                                 "Repository...",
-                                "https://github.com/longbridge/gpui-component",
+                                "https://github.com/longbridge/gpui-kit",
                             )),
                         )
                         .description("Open the GitHub repository in your default browser."),
@@ -435,9 +498,9 @@ impl SettingsStory {
                                 Button::new("open-url")
                                     .outline()
                                     .label("Website...")
-                                    .with_size(options.size)
+                                    .with_size(options.size())
                                     .on_click(|_, _window, cx| {
-                                        cx.open_url("https://longbridge.github.io/gpui-component/");
+                                        cx.open_url("https://gpui-kit.com/");
                                     })
                             }),
                         )
@@ -448,7 +511,7 @@ impl SettingsStory {
 }
 
 impl Focusable for SettingsStory {
-    fn focus_handle(&self, _: &gpui::App) -> gpui::FocusHandle {
+    fn focus_handle(&self, _: &gpui_kit::App) -> gpui_kit::FocusHandle {
         self.focus_handle.clone()
     }
 }

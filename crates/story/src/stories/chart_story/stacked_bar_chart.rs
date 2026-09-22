@@ -1,14 +1,16 @@
 // You can draw any chart you want by using the `Plot`.
 
-use gpui::{App, Bounds, Pixels, TextAlign, Window, px};
-use gpui_component::{
+use gpui_kit::base::motion::spring;
+use gpui_kit::component::{
     ActiveTheme,
     plot::{
         AXIS_GAP, AxisText, Grid, IntoPlot, Plot, PlotAxis,
         scale::{Scale, ScaleBand, ScaleLinear, ScaleOrdinal},
         shape::{Bar, Stack, StackSeries},
+        tooltip::{CrossLine, PlotHover, Tooltip, TooltipState},
     },
 };
+use gpui_kit::*;
 
 use super::DailyDevice;
 
@@ -16,6 +18,8 @@ use super::DailyDevice;
 pub struct StackedBarChart {
     data: Vec<DailyDevice>,
     series: Vec<StackSeries<DailyDevice>>,
+    /// Where the highlight band has slid to, sampled in `hover`.
+    band_center: Option<Pixels>,
 }
 
 impl StackedBarChart {
@@ -33,7 +37,11 @@ impl StackedBarChart {
             })
             .series();
 
-        Self { data, series }
+        Self {
+            data,
+            series,
+            band_center: None,
+        }
     }
 }
 
@@ -111,5 +119,115 @@ impl Plot for StackedBarChart {
                 .fill(move |_, _, _| fill)
                 .paint(&bounds, window, cx);
         }
+    }
+
+    fn id(&self) -> Option<ElementId> {
+        // Single demo instance, so a fixed id is fine.
+        Some("stacked-bar-chart".into())
+    }
+
+    fn tooltip_state(
+        &self,
+        position: Point<Pixels>,
+        bounds: Bounds<Pixels>,
+        _cx: &App,
+    ) -> Option<TooltipState> {
+        // Band scale matches `paint`.
+        let x = ScaleBand::new(
+            self.data.iter().map(|v| v.date.clone()).collect(),
+            vec![0., bounds.size.width.as_f32()],
+        )
+        .padding_inner(0.4)
+        .padding_outer(0.2);
+        let band_width = x.band_width();
+
+        // Ignore the x-axis label gutter so hovering the labels doesn't show a tooltip.
+        if position.y.as_f32() > bounds.size.height.as_f32() - AXIS_GAP {
+            return None;
+        }
+
+        let index = x.least_index(position.x.as_f32());
+        let d = self.data.get(index)?;
+        let center_x = x.tick(&d.date.clone())? + band_width / 2.;
+
+        Some(TooltipState::new(
+            index,
+            point(px(center_x), position.y),
+            vec![],
+        ))
+    }
+
+    fn hover(&mut self, hover: Option<&PlotHover>, window: &mut Window, cx: &mut App) {
+        // The band slides to the hovered column; on the first hovered frame it
+        // adopts the column instead of travelling from where the last hover ended.
+        self.band_center = hover.map(|hover| {
+            spring(
+                ("stacked-bar-chart", "band"),
+                hover.state().cross_line.x,
+                cx.theme()
+                    .motion_tokens()
+                    .spring_control
+                    .with_epsilon(0.1)
+                    .with_travel(!hover.is_entering()),
+                window,
+                cx,
+            )
+        });
+    }
+
+    fn tooltip(
+        &self,
+        state: &TooltipState,
+        cursor: Point<Pixels>,
+        bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        let d = self.data.get(state.index)?;
+
+        // Same color mapping as `paint`.
+        let ordinal = ScaleOrdinal::new(
+            self.series.iter().map(|s| s.key.clone()).collect(),
+            vec![
+                cx.theme().chart_4,
+                cx.theme().chart_3,
+                cx.theme().chart_2,
+                cx.theme().chart_1,
+            ],
+        );
+
+        // Highlight the hovered column with a translucent band the width of the bars,
+        // confined to the plot height so it doesn't cover the x-axis labels.
+        let band_width = ScaleBand::new(
+            self.data.iter().map(|v| v.date.clone()).collect(),
+            vec![0., bounds.size.width.as_f32()],
+        )
+        .padding_inner(0.4)
+        .padding_outer(0.2)
+        .band_width();
+
+        let center = self.band_center.unwrap_or(state.cross_line.x);
+        // The overlay fades in and out with the hover on its own.
+        let mut tooltip = Tooltip::new(cursor, bounds.size)
+            .gap(px(8.))
+            .cross_line(
+                CrossLine::new(point(center, state.cross_line.y))
+                    .height(bounds.size.height.as_f32() - AXIS_GAP)
+                    .band(px(band_width)),
+            )
+            .title(d.date.clone());
+
+        // One row per stacked series (its segment value at this band).
+        for series in self.series.iter() {
+            let color = ordinal.map(&series.key).unwrap_or(cx.theme().chart_4);
+            let value = series
+                .points
+                .get(state.index)
+                .map(|p| p.y1 - p.y0)
+                .unwrap_or(0.);
+            tooltip = tooltip.row(color, series.key.clone(), format!("{}", value));
+        }
+
+        Some(tooltip.into_any_element())
     }
 }
