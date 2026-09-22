@@ -11,6 +11,7 @@ node_modules/
 docs/superpowers/
 docs/research/
 /.scratch/
+/.kilo/
 
 # WASM build artifacts
 crates/story-web/www/src/wasm/*.js
@@ -41,5 +42,4 @@ rules/.gitkeep
 rule-tests/.gitkeep
 sgconfig.yml
 .agents/ast_index.md
-.kilo/kilo.jsonc
 localonly/
