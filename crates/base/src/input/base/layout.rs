@@ -1,9 +1,29 @@
 use std::{ops::Range, rc::Rc};
 
-use gpui::{Bounds, Half, Pixels, ShapedLine, TextAlign, px};
+use gpui::{Bounds, Font, Half, Pixels, ShapedLine, TextAlign, px};
 
 use super::{WrappingIndent, display_map::LineLayout};
 use crate::input::LinePresentation;
+
+#[derive(Clone, PartialEq)]
+pub(super) struct PresentationLayoutKey {
+    pub(super) document_revision: u64,
+    pub(super) geometry_revision: u64,
+    pub(super) decorator_identity: Option<usize>,
+    pub(super) decorator_revision: Option<u64>,
+    pub(super) font: Font,
+    pub(super) font_size: Pixels,
+    pub(super) line_height: Pixels,
+    pub(super) rem_size: Pixels,
+}
+
+#[derive(Clone)]
+pub(super) struct PresentationLayoutCache {
+    pub(super) key: PresentationLayoutKey,
+    pub(super) presentations: Rc<Vec<LinePresentation>>,
+    pub(super) vertical_layout: VerticalLayoutMap,
+    pub(super) presentation_hash: u64,
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct WhitespaceIndicators {
@@ -64,6 +84,8 @@ impl VerticalLayoutMap {
 
 #[derive(Clone)]
 pub(super) struct LastLayout {
+    pub(super) document_revision: u64,
+    pub(super) presentation_hash: u64,
     pub(super) visible_range: Range<usize>,
     pub(super) visible_buffer_lines: Vec<usize>,
     pub(super) visible_line_byte_offsets: Vec<usize>,

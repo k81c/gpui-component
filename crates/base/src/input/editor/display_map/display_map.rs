@@ -29,6 +29,7 @@ use crate::input::rope_ext::RopeExt as _;
 pub struct DisplayMap {
     wrap_map: WrapMap,
     fold_map: FoldMap,
+    geometry_revision: u64,
 }
 
 impl DisplayMap {
@@ -36,6 +37,7 @@ impl DisplayMap {
         Self {
             wrap_map: WrapMap::new(font, font_size, wrap_width),
             fold_map: FoldMap::new(),
+            geometry_revision: 0,
         }
     }
 
@@ -130,19 +132,31 @@ impl DisplayMap {
 
     /// Set fold candidates (from tree-sitter/LSP)
     pub fn set_fold_candidates(&mut self, candidates: Vec<FoldRange>) {
+        let folded = self.fold_map.folded_ranges().to_vec();
         self.fold_map.set_candidates(candidates);
+        if self.fold_map.folded_ranges() != folded {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        }
         self.rebuild_fold_projection();
     }
 
     /// Set a fold at the given start_line (must be in candidates)
     pub fn set_folded(&mut self, start_line: usize, folded: bool) {
+        let before = self.fold_map.folded_ranges().to_vec();
         self.fold_map.set_folded(start_line, folded);
+        if self.fold_map.folded_ranges() != before {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        }
         self.rebuild_fold_projection();
     }
 
     /// Toggle fold at the given start_line
     pub fn toggle_fold(&mut self, start_line: usize) {
+        let before = self.fold_map.folded_ranges().to_vec();
         self.fold_map.toggle_fold(start_line);
+        if self.fold_map.folded_ranges() != before {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        }
         self.rebuild_fold_projection();
     }
 
@@ -166,7 +180,11 @@ impl DisplayMap {
 
     /// Clear all folds
     pub fn clear_folds(&mut self) {
+        let changed = !self.fold_map.folded_ranges().is_empty();
         self.fold_map.clear_folds();
+        if changed {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        }
         self.rebuild_fold_projection();
     }
 
@@ -222,6 +240,8 @@ impl DisplayMap {
     ) {
         self.wrap_map
             .on_text_changed(changed_text, range, new_text, cx);
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        self.fold_map.mark_dirty();
         self.rebuild_fold_projection();
     }
 
@@ -231,31 +251,45 @@ impl DisplayMap {
         metrics: std::rc::Rc<[(std::ops::Range<usize>, Pixels)]>,
         cx: &mut App,
     ) {
-        self.wrap_map.set_inline_metrics(metrics, cx);
-        self.rebuild_fold_projection();
+        if self.wrap_map.set_inline_metrics(metrics, cx) {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+            self.fold_map.mark_dirty();
+            self.rebuild_fold_projection();
+        }
     }
 
     pub fn on_layout_changed(&mut self, wrap_width: Option<Pixels>, cx: &mut App) {
-        self.wrap_map.on_layout_changed(wrap_width, cx);
-        self.rebuild_fold_projection();
+        if self.wrap_map.on_layout_changed(wrap_width, cx) {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+            self.fold_map.mark_dirty();
+            self.rebuild_fold_projection();
+        }
     }
 
     /// Set the wrapping indent for continuation lines.
     pub fn set_wrapping_indent(&mut self, wrapping_indent: WrappingIndent, cx: &mut App) {
-        self.wrap_map.set_wrapping_indent(wrapping_indent, cx);
-        self.rebuild_fold_projection();
+        if self.wrap_map.set_wrapping_indent(wrapping_indent, cx) {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+            self.fold_map.mark_dirty();
+            self.rebuild_fold_projection();
+        }
     }
 
     /// Set font parameters
     pub fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) {
-        self.wrap_map.set_font(font, font_size, cx);
-        self.rebuild_fold_projection();
+        if self.wrap_map.set_font(font, font_size, cx) {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+            self.fold_map.mark_dirty();
+            self.rebuild_fold_projection();
+        }
     }
 
     /// Ensure text is prepared (initializes wrapper if needed)
     pub fn ensure_text_prepared(&mut self, text: &Rope, cx: &mut App) {
         let did_initialize = self.wrap_map.ensure_text_prepared(text, cx);
         if did_initialize {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+            self.fold_map.mark_dirty();
             self.rebuild_fold_projection();
         }
     }
@@ -263,6 +297,8 @@ impl DisplayMap {
     /// Initialize with text
     pub fn set_text(&mut self, text: &Rope, cx: &mut App) {
         self.wrap_map.set_text(text, cx);
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        self.fold_map.mark_dirty();
         self.rebuild_fold_projection();
     }
 
@@ -380,5 +416,34 @@ impl DisplayMap {
     #[inline]
     pub fn buffer_line_count(&self) -> usize {
         self.wrap_map.buffer_line_count()
+    }
+
+    pub(crate) fn geometry_revision(&self) -> u64 {
+        self.geometry_revision
+    }
+
+    pub(crate) fn has_inline_metrics(&self) -> bool {
+        self.wrap_map.has_inline_metrics()
+    }
+
+    pub(crate) fn visible_wrap_row_counts(&self) -> Vec<usize> {
+        let no_folds = self.fold_map.folded_ranges().is_empty();
+        let mut wrap_row = 0;
+        self.wrap_map
+            .wrapper()
+            .iter_lines()
+            .map(|line| {
+                let rows = line.lines_len();
+                let visible = if no_folds {
+                    rows
+                } else {
+                    (wrap_row..wrap_row + rows)
+                        .filter(|row| self.fold_map.wrap_row_to_display_row(*row).is_some())
+                        .count()
+                };
+                wrap_row += rows;
+                visible
+            })
+            .collect()
     }
 }

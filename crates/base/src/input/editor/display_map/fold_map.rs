@@ -53,6 +53,10 @@ impl FoldMap {
         self.cached_wrap_row_count = wrap_row_count;
     }
 
+    pub(super) fn mark_dirty(&mut self) {
+        self.needs_rebuild = true;
+    }
+
     /// Get total number of visible display rows
     pub(super) fn display_row_count(&self) -> usize {
         if self.folded.is_empty() {
@@ -112,12 +116,20 @@ impl FoldMap {
         candidates.dedup_by_key(|r| r.start_line);
         self.candidates = candidates;
 
-        // Remove any folded ranges that are no longer in candidates
-        self.folded.retain(|fold| {
-            self.candidates
-                .iter()
-                .any(|c| c.start_line == fold.start_line)
-        });
+        let previous_folds = self.folded.clone();
+        self.folded = self
+            .folded
+            .iter()
+            .filter_map(|fold| {
+                self.candidates
+                    .iter()
+                    .find(|candidate| candidate.start_line == fold.start_line)
+                    .copied()
+            })
+            .collect();
+        if self.folded != previous_folds {
+            self.needs_rebuild = true;
+        }
     }
 
     /// Merge new candidates extracted from an edited region into existing candidates.
@@ -191,6 +203,9 @@ impl FoldMap {
     /// Clear all folds
     #[inline]
     pub(super) fn clear_folds(&mut self) {
+        if !self.folded.is_empty() {
+            self.needs_rebuild = true;
+        }
         self.folded.clear();
     }
 
@@ -244,7 +259,21 @@ impl FoldMap {
     ///
     /// This is the core algorithm that projects wrap rows to display rows.
     pub(super) fn rebuild(&mut self, wrap_map: &WrapMap) {
-        let wrap_row_count = wrap_map.wrap_row_count();
+        let wrap_rows_per_line = wrap_map
+            .wrapper()
+            .iter_lines()
+            .map(|line| line.lines_len())
+            .collect::<Vec<_>>();
+        self.rebuild_from_line_wrap_counts(&wrap_rows_per_line);
+    }
+
+    fn rebuild_from_line_wrap_counts(&mut self, wrap_rows_per_line: &[usize]) {
+        let mut first_wrap_row = Vec::with_capacity(wrap_rows_per_line.len() + 1);
+        first_wrap_row.push(0);
+        for count in wrap_rows_per_line {
+            first_wrap_row.push(first_wrap_row.last().copied().unwrap_or(0) + count);
+        }
+        let wrap_row_count = first_wrap_row.last().copied().unwrap_or(0);
 
         // Performance optimization: skip rebuild if nothing changed
         if !self.needs_rebuild && wrap_row_count == self.cached_wrap_row_count {
@@ -279,12 +308,14 @@ impl FoldMap {
             }
 
             // Get wrap_row ranges for the hidden buffer lines
-            let start_wrap_row = wrap_map.buffer_line_to_first_wrap_row(hide_start_line);
-            let end_wrap_row = if hide_end_line + 1 < wrap_map.buffer_line_count() {
-                wrap_map.buffer_line_to_first_wrap_row(hide_end_line + 1)
-            } else {
-                wrap_row_count
-            };
+            let start_wrap_row = first_wrap_row
+                .get(hide_start_line)
+                .copied()
+                .unwrap_or(wrap_row_count);
+            let end_wrap_row = first_wrap_row
+                .get(hide_end_line + 1)
+                .copied()
+                .unwrap_or(wrap_row_count);
 
             if start_wrap_row < end_wrap_row {
                 hidden_ranges.push(start_wrap_row..end_wrap_row);
@@ -293,7 +324,7 @@ impl FoldMap {
 
         // Merge overlapping hidden ranges
         hidden_ranges.sort_by_key(|r| r.start);
-        let mut merged_hidden = Vec::new();
+        let mut merged_hidden: Vec<usize> = Vec::new();
         for range in hidden_ranges {
             if let Some(last) = merged_hidden.last_mut() {
                 if range.start <= *last {
@@ -339,5 +370,51 @@ impl FoldMap {
         }
 
         self.needs_rebuild = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebuilds_when_wrap_distribution_changes_without_changing_total() {
+        let mut map = FoldMap::new();
+        map.set_candidates(vec![FoldRange::new(0, 2)]);
+        map.set_folded(0, true);
+
+        map.rebuild_from_line_wrap_counts(&[1, 2, 1, 1]);
+        assert_eq!(visible_counts(&map, &[1, 2, 1, 1]), [1, 0, 1, 1]);
+
+        map.mark_dirty();
+        map.rebuild_from_line_wrap_counts(&[2, 1, 1, 1]);
+        assert_eq!(visible_counts(&map, &[2, 1, 1, 1]), [2, 0, 1, 1]);
+    }
+
+    #[test]
+    fn replacing_candidates_updates_the_active_fold_extent() {
+        let mut map = FoldMap::new();
+        map.set_candidates(vec![FoldRange::new(0, 3)]);
+        map.set_folded(0, true);
+        map.rebuild_from_line_wrap_counts(&[1, 1, 1, 1]);
+        assert_eq!(visible_counts(&map, &[1, 1, 1, 1]), [1, 0, 0, 1]);
+
+        map.set_candidates(vec![FoldRange::new(0, 2)]);
+        map.rebuild_from_line_wrap_counts(&[1, 1, 1, 1]);
+        assert_eq!(visible_counts(&map, &[1, 1, 1, 1]), [1, 0, 1, 1]);
+    }
+
+    fn visible_counts(map: &FoldMap, wrap_rows_per_line: &[usize]) -> Vec<usize> {
+        let mut wrap_row = 0;
+        wrap_rows_per_line
+            .iter()
+            .map(|count| {
+                let visible = (wrap_row..wrap_row + count)
+                    .filter(|row| map.wrap_row_to_display_row(*row).is_some())
+                    .count();
+                wrap_row += count;
+                visible
+            })
+            .collect()
     }
 }

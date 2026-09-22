@@ -350,6 +350,7 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) document_revision: u64,
     pub(super) token_presentation: super::InlineTokenPresentation,
     pub(super) token_layout_cache: Option<Box<super::token_presentation::TokenLayoutCache>>,
+    pub(super) presentation_layout_cache: Option<super::layout::PresentationLayoutCache>,
     /// The start offset of a pressed token, with the document revision and
     /// pointer position at the press.
     pub(super) pressed_token: Option<(usize, u64, Point<Pixels>)>,
@@ -712,6 +713,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             document_revision: 0,
             token_presentation: Default::default(),
             token_layout_cache: None,
+            presentation_layout_cache: None,
             pressed_token: None,
             selections: Selections::default(),
             selected_word_range: None,
@@ -849,6 +851,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         self.presentation_decorator = decorator;
+        self.presentation_layout_cache = None;
         cx.notify();
     }
 
@@ -877,6 +880,29 @@ impl<M: InputModeKind> InputBaseState<M> {
             .highlighter()
             .and_then(|highlighter| highlighter.borrow().as_ref()?.document_snapshot())
             .and_then(|snapshot| snapshot.downcast::<T>().ok())
+    }
+
+    /// Whether the current document snapshot is waiting for highlighter work.
+    #[doc(hidden)]
+    pub fn highlighter_snapshot_pending(&self) -> bool {
+        if self._pending_update {
+            return true;
+        }
+        self.mode
+            .highlighter()
+            .and_then(|highlighter| {
+                highlighter
+                    .borrow()
+                    .as_ref()
+                    .map(|highlighter| highlighter.document_snapshot_pending())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Monotonic revision of the document text owned by this editor.
+    #[doc(hidden)]
+    pub fn document_revision(&self) -> u64 {
+        self.document_revision
     }
 
     /// Set presentation padding for multi-line text and its scrollbar layout.
@@ -1255,7 +1281,11 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// Set the default value of the input field.
     pub fn default_value(mut self, value: impl Into<SharedString>) -> Self {
         let text: SharedString = value.into();
-        self.text = Rope::from(self.normalize_input(&text).as_ref());
+        let text = Rope::from(self.normalize_input(&text).as_ref());
+        if !self.text.eq(&text) {
+            self.document_revision = self.document_revision.wrapping_add(1);
+        }
+        self.text = text;
         if let Some(diagnostics) = self.mode.diagnostics_mut() {
             diagnostics.reset(&self.text)
         }
@@ -4545,6 +4575,163 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn test_document_revision_tracks_replacement_and_history(cx: &mut TestAppContext) {
+        let view = InputView::build_textarea(cx, |state| state.default_value("initial"));
+        view.window_handle
+            .update(cx, |_, window, cx| {
+                view.input.update(cx, |state, cx| {
+                    let default_revision = state.document_revision();
+                    assert!(default_revision > 0);
+
+                    state.set_value("replacement", window, cx);
+                    let replacement_revision = state.document_revision();
+                    assert!(replacement_revision > default_revision);
+
+                    state.replace_text_in_range(None, "!", window, cx);
+                    let edit_revision = state.document_revision();
+                    assert!(edit_revision > replacement_revision);
+
+                    state.undo(&Undo, window, cx);
+                    let undo_revision = state.document_revision();
+                    assert!(undo_revision > edit_revision);
+
+                    state.redo(&Redo, window, cx);
+                    assert!(state.document_revision() > undo_revision);
+                });
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn test_presentation_layout_cache_reuses_revisioned_decorator(cx: &mut TestAppContext) {
+        use crate::input::{InputPresentationDecorator, LinePresentation};
+        use std::{cell::Cell, rc::Rc};
+
+        struct CountingPresentation {
+            calls: Rc<Cell<usize>>,
+            revision: Rc<Cell<u64>>,
+        }
+
+        impl InputPresentationDecorator for CountingPresentation {
+            fn line_metrics_revision(&self) -> Option<u64> {
+                Some(self.revision.get())
+            }
+
+            fn line_presentation(&self, _: usize, default: LinePresentation) -> LinePresentation {
+                self.calls.set(self.calls.get() + 1);
+                default
+            }
+        }
+
+        let calls = Rc::new(Cell::new(0));
+        let revision = Rc::new(Cell::new(0));
+        let view =
+            InputView::build_textarea(cx, |state| state.rows(4).default_value("one\ntwo\nthree"));
+        view.window_handle
+            .update(cx, |_, _, cx| {
+                view.input.update(cx, |state, cx| {
+                    state.set_presentation_decorator(
+                        Some(Rc::new(CountingPresentation {
+                            calls: calls.clone(),
+                            revision: revision.clone(),
+                        })),
+                        cx,
+                    );
+                });
+            })
+            .unwrap();
+
+        let mut visual = VisualTestContext::from_window(view.window_handle.into(), cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let first_calls = calls.get();
+        assert!(first_calls > 0);
+
+        visual.update(|window, cx| {
+            for _ in 0..100 {
+                window.draw(cx).clear(cx);
+            }
+        });
+        assert_eq!(calls.get(), first_calls);
+
+        revision.set(1);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(calls.get() > first_calls);
+    }
+
+    #[gpui::test]
+    fn test_presentation_change_preserves_scrolled_top_line(cx: &mut TestAppContext) {
+        use crate::input::{InputPresentationDecorator, LinePresentation};
+        use std::{cell::Cell, rc::Rc};
+
+        struct ResizingPresentation(Rc<Cell<u64>>);
+        impl InputPresentationDecorator for ResizingPresentation {
+            fn line_metrics_revision(&self) -> Option<u64> {
+                Some(self.0.get())
+            }
+
+            fn line_presentation(
+                &self,
+                _: usize,
+                mut default: LinePresentation,
+            ) -> LinePresentation {
+                default.line_height = if self.0.get() == 0 { px(20.) } else { px(40.) };
+                default
+            }
+        }
+
+        let revision = Rc::new(Cell::new(0));
+        let text = (0..100)
+            .map(|line| format!("line {line} {}\n", "wrapped ".repeat(30)))
+            .collect::<String>();
+        let view = InputView::build_textarea(cx, move |state| state.rows(4).default_value(text));
+        view.window_handle
+            .update(cx, |_, _, cx| {
+                view.input.update(cx, |state, cx| {
+                    state.set_presentation_decorator(
+                        Some(Rc::new(ResizingPresentation(revision.clone()))),
+                        cx,
+                    );
+                });
+            })
+            .unwrap();
+
+        let mut visual = VisualTestContext::from_window(view.window_handle.into(), cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.update(|window, cx| {
+            view.input.update(cx, |state, cx| {
+                state.set_scroll_offset(point(px(0.), px(-1000.)), cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let old_scroll = view
+            .input
+            .read_with(&visual, |state, _| state.scroll_offset().y);
+        let old_hash = view.input.read_with(&visual, |state, _| {
+            state.last_layout.as_ref().unwrap().presentation_hash
+        });
+        assert!(old_scroll < px(0.));
+
+        revision.set(1);
+        visual.update(|_, cx| {
+            view.input.update(cx, |_, cx| cx.notify());
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_ne!(
+            old_hash,
+            view.input.read_with(&visual, |state, _| {
+                state.last_layout.as_ref().unwrap().presentation_hash
+            })
+        );
+        assert_eq!(
+            view.input
+                .read_with(&visual, |state, _| state.scroll_offset().y),
+            old_scroll * 2
+        );
+    }
+
     #[gpui::test]
     fn test_inline_tokens_receive_their_presented_line_height(cx: &mut TestAppContext) {
         use crate::input::{

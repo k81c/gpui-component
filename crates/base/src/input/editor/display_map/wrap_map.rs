@@ -116,22 +116,26 @@ impl WrapMap {
         &mut self,
         metrics: std::rc::Rc<[(std::ops::Range<usize>, Pixels)]>,
         cx: &mut App,
-    ) {
-        self.wrapper.set_inline_metrics(metrics, cx);
+    ) -> bool {
+        self.wrapper.set_inline_metrics(metrics, cx)
     }
 
-    pub(super) fn on_layout_changed(&mut self, wrap_width: Option<Pixels>, cx: &mut App) {
-        self.wrapper.set_wrap_width(wrap_width, cx);
+    pub(super) fn on_layout_changed(&mut self, wrap_width: Option<Pixels>, cx: &mut App) -> bool {
+        self.wrapper.set_wrap_width(wrap_width, cx)
     }
 
     /// Set the wrapping indent mode for continuation lines.
-    pub(super) fn set_wrapping_indent(&mut self, wrapping_indent: WrappingIndent, cx: &mut App) {
-        self.wrapper.set_wrapping_indent(wrapping_indent, cx);
+    pub(super) fn set_wrapping_indent(
+        &mut self,
+        wrapping_indent: WrappingIndent,
+        cx: &mut App,
+    ) -> bool {
+        self.wrapper.set_wrapping_indent(wrapping_indent, cx)
     }
 
     /// Set font parameters
-    pub(super) fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) {
-        self.wrapper.set_font(font, font_size, cx);
+    pub(super) fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) -> bool {
+        self.wrapper.set_font(font, font_size, cx)
     }
 
     /// Ensure text is prepared (initializes wrapper if needed)
@@ -148,6 +152,10 @@ impl WrapMap {
     /// Get access to the underlying wrapper (for rendering/hit-testing)
     pub(crate) fn wrapper(&self) -> &TextWrapper {
         &self.wrapper
+    }
+
+    pub(super) fn has_inline_metrics(&self) -> bool {
+        self.wrapper.has_inline_metrics()
     }
 
     /// Get the line item by buffer row index.

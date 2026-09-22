@@ -13,7 +13,11 @@ use gpui::{
 };
 use ropey::Rope;
 use smallvec::SmallVec;
-use std::{ops::Range, rc::Rc};
+use std::{
+    hash::{DefaultHasher, Hash as _, Hasher as _},
+    ops::Range,
+    rc::Rc,
+};
 
 use crate::{
     Scrollbar,
@@ -22,7 +26,10 @@ use crate::{
 
 use super::{
     InputBaseState, TextDecoration,
-    layout::{LastLayout, VerticalLayoutMap, WhitespaceIndicators},
+    layout::{
+        LastLayout, PresentationLayoutCache, PresentationLayoutKey, VerticalLayoutMap,
+        WhitespaceIndicators,
+    },
     mode::LayoutMode,
 };
 
@@ -400,6 +407,14 @@ struct FoldIconLayout {
 pub(super) struct TextElement<M: InputModeKind> {
     pub(crate) state: Entity<InputBaseState<M>>,
     placeholder: SharedString,
+}
+
+struct TokenMeasureLayout<'a> {
+    vertical_layout: &'a VerticalLayoutMap,
+    presentations: &'a [crate::input::LinePresentation],
+    presentation_key: u64,
+    rem_size: Pixels,
+    viewport: Pixels,
 }
 
 impl<M: InputModeKind> TextElement<M> {
@@ -1083,14 +1098,12 @@ impl<M: InputModeKind> TextElement<M> {
         state: &InputBaseState<M>,
         presentations: &[crate::input::LinePresentation],
     ) -> VerticalLayoutMap {
+        let visible_rows = state.display_map.visible_wrap_row_counts();
         VerticalLayoutMap::new(
             presentations
                 .iter()
-                .enumerate()
-                .map(|(line, presentation)| {
-                    let rows = state
-                        .display_map
-                        .visible_wrap_row_count_for_buffer_line(line);
+                .zip(visible_rows)
+                .map(|(presentation, rows)| {
                     if rows == 0 {
                         px(0.)
                     } else {
@@ -1101,6 +1114,150 @@ impl<M: InputModeKind> TextElement<M> {
                 })
                 .collect(),
         )
+    }
+
+    fn presentation_layout(
+        &self,
+        font: gpui::Font,
+        font_size: Pixels,
+        line_height: Pixels,
+        rem_size: Pixels,
+        cx: &mut App,
+    ) -> (
+        Rc<Vec<crate::input::LinePresentation>>,
+        VerticalLayoutMap,
+        u64,
+    ) {
+        let state = self.state.read(cx);
+        let decorator_identity = state
+            .presentation_decorator
+            .as_ref()
+            .map(|decorator| Rc::as_ptr(decorator) as *const () as usize);
+        let decorator_revision = state
+            .presentation_decorator
+            .as_ref()
+            .and_then(|decorator| decorator.line_metrics_revision());
+        let cacheable = state.presentation_decorator.is_none() || decorator_revision.is_some();
+        let key = PresentationLayoutKey {
+            document_revision: state.document_revision,
+            geometry_revision: state.display_map.geometry_revision(),
+            decorator_identity,
+            decorator_revision,
+            font,
+            font_size,
+            line_height,
+            rem_size,
+        };
+        if cacheable
+            && let Some(cache) = state
+                .presentation_layout_cache
+                .as_ref()
+                .filter(|cache| cache.key == key)
+        {
+            return (
+                cache.presentations.clone(),
+                cache.vertical_layout.clone(),
+                cache.presentation_hash,
+            );
+        }
+
+        let presentations = Rc::new(Self::line_presentations(&state, font_size, line_height));
+        let mut hasher = DefaultHasher::new();
+        for presentation in presentations.iter() {
+            f32::from(presentation.font_size)
+                .to_bits()
+                .hash(&mut hasher);
+            f32::from(presentation.line_height)
+                .to_bits()
+                .hash(&mut hasher);
+            f32::from(presentation.spacing_before)
+                .to_bits()
+                .hash(&mut hasher);
+            f32::from(presentation.spacing_after)
+                .to_bits()
+                .hash(&mut hasher);
+        }
+        let presentation_hash = hasher.finish();
+        let vertical_layout = Self::vertical_layout(&state, &presentations);
+        self.state.update(cx, |state, _| {
+            state.presentation_layout_cache = Some(PresentationLayoutCache {
+                key,
+                presentations: presentations.clone(),
+                vertical_layout: vertical_layout.clone(),
+                presentation_hash,
+            });
+        });
+        (presentations, vertical_layout, presentation_hash)
+    }
+
+    fn preserve_scroll_anchor_for_presentation_change(
+        &self,
+        vertical_layout: &VerticalLayoutMap,
+        presentations: &[crate::input::LinePresentation],
+        presentation_hash: u64,
+        cx: &mut App,
+    ) {
+        let anchor = {
+            let state = self.state.read(cx);
+            let Some(last_layout) = state.last_layout.as_ref() else {
+                return;
+            };
+            if state.is_single_line()
+                || state.masked
+                || last_layout.document_revision != state.document_revision
+                || last_layout.presentation_hash == presentation_hash
+                || state.deferred_scroll_offset.is_some()
+                || state.auto_scroll.is_active()
+                || state.last_selected_range.as_ref() != Some(state.active_selection())
+            {
+                return;
+            }
+
+            let scroll_offset = state.scroll_handle.offset();
+            let viewport_top = (-scroll_offset.y).max(px(0.));
+            let row = last_layout.vertical_layout.line_at_y(viewport_top);
+            let Some(visible_index) = last_layout
+                .visible_buffer_lines
+                .iter()
+                .position(|visible_row| *visible_row == row)
+            else {
+                return;
+            };
+            let Some(line) = last_layout.lines.get(visible_index) else {
+                return;
+            };
+            let presentation = last_layout.presentation_for_visible_index(visible_index);
+            let line_origin = last_layout.vertical_layout.origin_for_line(row);
+            let content_y = (viewport_top - line_origin - presentation.spacing_before).max(px(0.));
+            let local_row = ((content_y / presentation.line_height) as usize)
+                .min(line.wrapped_lines.len().saturating_sub(1));
+            let local_offset = line
+                .wrapped_lines
+                .iter()
+                .take(local_row)
+                .map(|line| line.len)
+                .sum::<usize>();
+            let anchor_offset = last_layout.visible_line_byte_offsets[visible_index] + local_offset;
+            let pixel_in_row = content_y - presentation.line_height * local_row;
+            (anchor_offset, pixel_in_row, scroll_offset.x)
+        };
+
+        let state = self.state.read(cx);
+        let buffer_row = state.text.offset_to_point(anchor.0).row;
+        let display_point = state
+            .display_map
+            .offset_to_wrap_display_point_with_affinity(anchor.0, false);
+        let Some(presentation) = presentations.get(buffer_row) else {
+            return;
+        };
+        let viewport_top = vertical_layout.origin_for_line(buffer_row)
+            + presentation.spacing_before
+            + presentation.line_height * display_point.local_row
+            + anchor.1;
+        let offset = point(anchor.2, -viewport_top.max(px(0.)));
+        self.state.update(cx, |state, _| {
+            state.deferred_scroll_offset = Some(offset);
+        });
     }
 
     /// Return (line_number_width, line_number_len)
@@ -1604,31 +1761,23 @@ impl<M: InputModeKind> TextElement<M> {
         &self,
         width: Pixels,
         line_height: Pixels,
-        vertical_layout: &VerticalLayoutMap,
-        presentations: &[crate::input::LinePresentation],
-        viewport: Pixels,
+        layout: TokenMeasureLayout<'_>,
         window: &mut Window,
         cx: &mut App,
     ) -> std::collections::HashMap<usize, AnyElement> {
         let style = window.text_style();
         let state = self.state.read(cx);
-        let presentation_key = presentations.iter().fold(0u64, |hash, presentation| {
-            hash.rotate_left(7)
-                ^ u64::from(f32::from(presentation.font_size).to_bits())
-                ^ u64::from(f32::from(presentation.line_height).to_bits()).rotate_left(13)
-                ^ u64::from(f32::from(presentation.spacing_before).to_bits()).rotate_left(29)
-                ^ u64::from(f32::from(presentation.spacing_after).to_bits()).rotate_left(43)
-        });
         let key = (
             style.font(),
             style.font_size.to_pixels(window.rem_size()),
+            layout.rem_size,
             width,
             line_height,
             state.is_single_line() || !state.soft_wrap,
-            presentation_key,
+            layout.presentation_key,
         );
         if !state.tokens_visible() {
-            if state.token_layout_cache.is_none() {
+            if !state.display_map.has_inline_metrics() {
                 return Default::default();
             }
             self.state.update(cx, |state, cx| {
@@ -1646,7 +1795,8 @@ impl<M: InputModeKind> TextElement<M> {
                     .iter()
                     .any(|span| !cache.widths.contains_key(&span.range().start))
         });
-        let (visible, _, _) = self.calculate_visible_range(state, vertical_layout, viewport);
+        let (visible, _, _) =
+            self.calculate_visible_range(state, layout.vertical_layout, layout.viewport);
         let start = state.text.line_start_offset(visible.start);
         let end = state.text.line_end_offset(visible.end.saturating_sub(1));
         let spans = state.token_spans();
@@ -1668,7 +1818,8 @@ impl<M: InputModeKind> TextElement<M> {
             })
             .map(|span| {
                 let row = state.text.offset_to_point(span.range().start).row;
-                let token_line_height = presentations
+                let token_line_height = layout
+                    .presentations
                     .get(row)
                     .map(|presentation| presentation.line_height)
                     .unwrap_or(line_height);
@@ -2405,7 +2556,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         };
 
         self.state.update(cx, |state, cx| {
-            state.display_map.set_font(font, text_size, cx);
+            state.display_map.set_font(font.clone(), text_size, cx);
             state.display_map.ensure_text_prepared(&state.text, cx);
         });
 
@@ -2464,23 +2615,42 @@ impl<M: InputModeKind> Element for TextElement<M> {
             });
         }
 
-        let state = self.state.read(cx);
+        let clear_inline_metrics = {
+            let state = self.state.read(cx);
+            !state.tokens_visible() && state.display_map.has_inline_metrics()
+        };
+        if clear_inline_metrics {
+            self.state.update(cx, |state, cx| {
+                state.display_map.set_inline_metrics(Rc::from([]), cx);
+            });
+        }
+
         let line_height = window.line_height();
-        let provisional_presentations = Self::line_presentations(&state, text_size, line_height);
-        let provisional_vertical_layout = Self::vertical_layout(&state, &provisional_presentations);
+        let rem_size = window.rem_size();
+        let (provisional_presentations, provisional_vertical_layout, presentation_key) =
+            self.presentation_layout(font.clone(), text_size, line_height, rem_size, cx);
         let token_elements = self.measure_tokens(
             (bounds.size.width - line_number_width - RIGHT_MARGIN).max(px(1.)),
             line_height,
-            &provisional_vertical_layout,
-            &provisional_presentations,
-            bounds.size.height,
+            TokenMeasureLayout {
+                vertical_layout: &provisional_vertical_layout,
+                presentations: &provisional_presentations,
+                presentation_key,
+                rem_size,
+                viewport: bounds.size.height,
+            },
             window,
             cx,
         );
+        let (all_line_presentations, vertical_layout, presentation_hash) =
+            self.presentation_layout(font, text_size, line_height, rem_size, cx);
+        self.preserve_scroll_anchor_for_presentation_change(
+            &vertical_layout,
+            &all_line_presentations,
+            presentation_hash,
+            cx,
+        );
         let state = self.state.read(cx);
-
-        let all_line_presentations = Self::line_presentations(&state, text_size, line_height);
-        let vertical_layout = Self::vertical_layout(&state, &all_line_presentations);
 
         let (visible_range, visible_buffer_lines, visible_top) =
             self.calculate_visible_range(&state, &vertical_layout, bounds.size.height);
@@ -2526,6 +2696,8 @@ impl<M: InputModeKind> Element for TextElement<M> {
             .collect();
 
         let mut last_layout = LastLayout {
+            document_revision: state.document_revision,
+            presentation_hash,
             visible_range,
             visible_buffer_lines,
             visible_line_byte_offsets,
@@ -2533,7 +2705,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             visible_range_offset,
             line_height,
             line_presentations: Rc::new(visible_presentations),
-            all_line_presentations: Rc::new(all_line_presentations),
+            all_line_presentations,
             vertical_layout,
             wrap_width,
             wrapping_indent,

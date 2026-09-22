@@ -240,32 +240,39 @@ impl TextWrapper {
         }
     }
 
-    pub(crate) fn set_wrap_width(&mut self, wrap_width: Option<Pixels>, cx: &mut App) {
+    pub(crate) fn set_wrap_width(&mut self, wrap_width: Option<Pixels>, cx: &mut App) -> bool {
         if wrap_width == self.wrap_width {
-            return;
+            return false;
         }
 
         self.wrap_width = wrap_width;
         self.update_all(&self.text.clone(), cx);
+        true
     }
 
-    pub(crate) fn set_wrapping_indent(&mut self, wrapping_indent: WrappingIndent, cx: &mut App) {
+    pub(crate) fn set_wrapping_indent(
+        &mut self,
+        wrapping_indent: WrappingIndent,
+        cx: &mut App,
+    ) -> bool {
         if wrapping_indent == self.wrapping_indent {
-            return;
+            return false;
         }
 
         self.wrapping_indent = wrapping_indent;
         self.update_all(&self.text.clone(), cx);
+        true
     }
 
-    pub(crate) fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) {
+    pub(crate) fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) -> bool {
         if self.font.eq(&font) && self.font_size == font_size {
-            return;
+            return false;
         }
 
         self.font = font;
         self.font_size = font_size;
         self.update_all(&self.text.clone(), cx);
+        true
     }
 
     pub(crate) fn prepare_if_need(&mut self, text: &Rope, cx: &mut App) -> bool {
@@ -363,9 +370,9 @@ impl TextWrapper {
         &mut self,
         metrics: Rc<[(Range<usize>, Pixels)]>,
         cx: &mut App,
-    ) {
+    ) -> bool {
         if self.inline_metrics == metrics {
-            return;
+            return false;
         }
         // Only rows whose element geometry changed need another wrap pass.
         let mut affected = Vec::new();
@@ -412,6 +419,11 @@ impl TextWrapper {
                 cx,
             );
         }
+        true
+    }
+
+    pub(crate) fn has_inline_metrics(&self) -> bool {
+        !self.inline_metrics.is_empty()
     }
 
     fn _update<F>(
@@ -1389,6 +1401,8 @@ mod tests {
     /// A layout context whose only load-bearing field is the line height.
     fn test_last_layout(line_height: Pixels) -> LastLayout {
         LastLayout {
+            document_revision: 0,
+            presentation_hash: 0,
             visible_range: 0..1,
             visible_buffer_lines: vec![0],
             visible_line_byte_offsets: vec![0],
@@ -1703,6 +1717,8 @@ mod tests {
         line_layout = line_layout.wrap_indent(px(20.0));
 
         let last_layout = LastLayout {
+            document_revision: 0,
+            presentation_hash: 0,
             visible_range: 0..1,
             visible_buffer_lines: vec![0],
             visible_line_byte_offsets: vec![0],

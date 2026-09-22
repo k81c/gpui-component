@@ -44,6 +44,14 @@ pub trait InputHighlighter {
         None
     }
 
+    /// Whether a snapshot for the current document is still being prepared.
+    ///
+    /// Higher-level components use this to distinguish a temporarily missing
+    /// snapshot from a highlighter that does not provide document snapshots.
+    fn document_snapshot_pending(&self) -> bool {
+        false
+    }
+
     fn update(
         &mut self,
         edit: Option<InputEdit>,
@@ -128,6 +136,14 @@ impl Default for LinePresentation {
 /// A decorator is intentionally limited to line metrics and background spans;
 /// parsing and snapshot management remain the responsibility of the UI crate.
 pub trait InputPresentationDecorator {
+    /// Changes whenever [`Self::line_presentation`] can return different metrics.
+    ///
+    /// `None` keeps the conservative behavior for decorators with mutable state
+    /// that cannot expose a revision.
+    fn line_metrics_revision(&self) -> Option<u64> {
+        None
+    }
+
     fn line_presentation(&self, _line: usize, default: LinePresentation) -> LinePresentation {
         default
     }

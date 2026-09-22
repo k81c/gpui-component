@@ -18,7 +18,9 @@ use gpui_base::input::{
 use ropey::{LineType, Rope};
 use tree_sitter::{InputEdit, ParseOptions, Point};
 
-use super::{LanguageRegistry, SyntaxHighlightUpdate, SyntaxHighlighter, WindowedTree};
+use super::{
+    LanguageRegistry, MarkedSyntaxSnapshot, SyntaxHighlightUpdate, SyntaxHighlighter, WindowedTree,
+};
 
 pub(crate) fn input_highlighter_factory() -> InputHighlighterFactory {
     Rc::new(|language| {
@@ -32,8 +34,12 @@ struct TreeSitterInputHighlighter {
     inner: Rc<RefCell<SyntaxHighlighter>>,
     parse_task: Rc<RefCell<Option<Task<()>>>>,
     windowed_parse_task: Rc<RefCell<Option<Task<()>>>>,
+    snapshot_task: Rc<RefCell<Option<Task<()>>>>,
     ready: Rc<Cell<bool>>,
-    snapshot_ready: Rc<Cell<bool>>,
+    snapshot: Rc<RefCell<Option<Rc<MarkedSyntaxSnapshot>>>>,
+    snapshot_pending: Rc<Cell<bool>>,
+    full_parse_pending: Rc<Cell<bool>>,
+    request_generation: Rc<Cell<u64>>,
 }
 
 struct CancelOnDrop(Arc<AtomicBool>);
@@ -50,8 +56,12 @@ impl TreeSitterInputHighlighter {
             inner: Rc::new(RefCell::new(SyntaxHighlighter::new(language))),
             parse_task: Rc::new(RefCell::new(None)),
             windowed_parse_task: Rc::new(RefCell::new(None)),
+            snapshot_task: Rc::new(RefCell::new(None)),
             ready: Rc::new(Cell::new(false)),
-            snapshot_ready: Rc::new(Cell::new(false)),
+            snapshot: Rc::new(RefCell::new(None)),
+            snapshot_pending: Rc::new(Cell::new(false)),
+            full_parse_pending: Rc::new(Cell::new(false)),
+            request_generation: Rc::new(Cell::new(0)),
         }
     }
 }
@@ -86,9 +96,15 @@ impl InputHighlighter for TreeSitterInputHighlighter {
     }
 
     fn document_snapshot(&self) -> Option<Rc<dyn Any>> {
-        self.snapshot_ready
-            .get()
-            .then(|| Rc::new(self.inner.borrow().marked_syntax_snapshot()) as Rc<dyn Any>)
+        self.snapshot
+            .borrow()
+            .as_ref()
+            .cloned()
+            .map(|snapshot| snapshot as Rc<dyn Any>)
+    }
+
+    fn document_snapshot_pending(&self) -> bool {
+        self.snapshot_pending.get()
     }
 
     fn update(
@@ -103,13 +119,27 @@ impl InputHighlighter for TreeSitterInputHighlighter {
         const SYNC_PARSE_MAX_BYTES: usize = 256 * 1024;
         const PARSE_DEBOUNCE: Duration = Duration::from_millis(150);
 
+        let marked_snapshot_supported = matches!(
+            self.inner.borrow().language().as_ref(),
+            "markdown" | "djot" | "asciidoc"
+        );
+        let generation = self.request_generation.get().wrapping_add(1);
+        self.request_generation.set(generation);
+        self.snapshot.borrow_mut().take();
+        self.snapshot_pending.set(marked_snapshot_supported);
+        self.snapshot_task.borrow_mut().take();
+
         let edit_start_byte = edit.as_ref().map(|edit| edit.start_byte).unwrap_or(0);
         // Capture reusable injection trees before the foreground update clears
         // stale renderable layers. Exact unchanged ranges remain reusable by
         // the background parse without exposing stale highlights meanwhile.
         let injection_data = self.inner.borrow().injection_parse_data();
         self.ready.set(false);
-        let status = {
+        let reuse_pending_tree =
+            self.full_parse_pending.get() && self.inner.borrow().text().eq(text);
+        let status = if reuse_pending_tree {
+            SyntaxHighlightUpdate::TimedOut
+        } else {
             let mut highlighter = self.inner.borrow_mut();
             if text.len() > SYNC_PARSE_MAX_BYTES {
                 highlighter.edit_tree(edit.map(to_tree_sitter_edit), text);
@@ -118,8 +148,41 @@ impl InputHighlighter for TreeSitterInputHighlighter {
                 highlighter.update_input_with_status(edit, text, Some(SYNC_PARSE_TIMEOUT))
             }
         };
-        self.snapshot_ready
-            .set(status != SyntaxHighlightUpdate::TimedOut);
+        self.full_parse_pending
+            .set(status == SyntaxHighlightUpdate::TimedOut);
+        if marked_snapshot_supported && status != SyntaxHighlightUpdate::TimedOut {
+            let language = self.inner.borrow().language().clone();
+            let tree = self.inner.borrow().tree().cloned();
+            let snapshot = self.snapshot.clone();
+            let snapshot_pending = self.snapshot_pending.clone();
+            let request_generation = self.request_generation.clone();
+            let text = text.clone();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let task = cx.spawn_in(window, async move |entity, cx| {
+                let _cancel_guard = CancelOnDrop(cancel.clone());
+                let result = cx
+                    .background_executor()
+                    .spawn({
+                        let cancel = cancel.clone();
+                        async move {
+                            SyntaxHighlighter::marked_syntax_snapshot_from(
+                                &language,
+                                &text,
+                                tree.as_ref(),
+                                Some(&cancel),
+                            )
+                        }
+                    })
+                    .await;
+                if request_generation.get() != generation {
+                    return;
+                }
+                snapshot_pending.set(false);
+                *snapshot.borrow_mut() = result.map(Rc::new);
+                let _ = entity.update(cx, |_, cx| cx.notify());
+            });
+            self.snapshot_task.borrow_mut().replace(task);
+        }
         if status == SyntaxHighlightUpdate::Complete {
             self.ready.set(true);
             self.parse_task.borrow_mut().take();
@@ -131,12 +194,16 @@ impl InputHighlighter for TreeSitterInputHighlighter {
         let parse_task = self.parse_task.clone();
         let windowed_parse_task = self.windowed_parse_task.clone();
         let ready = self.ready.clone();
-        let snapshot_ready = self.snapshot_ready.clone();
+        let snapshot = self.snapshot.clone();
+        let snapshot_pending = self.snapshot_pending.clone();
+        let full_parse_pending = self.full_parse_pending.clone();
+        let request_generation = self.request_generation.clone();
         let language = highlighter.borrow().language().clone();
         let old_tree = highlighter.borrow().tree().cloned();
         let pre_parsed_tree = (status == SyntaxHighlightUpdate::PendingInjections)
             .then(|| highlighter.borrow().tree().cloned())
             .flatten();
+        let needs_snapshot = marked_snapshot_supported && status == SyntaxHighlightUpdate::TimedOut;
         let full_tree_revision = highlighter.borrow().full_tree_revision();
         let parse_window = (status == SyntaxHighlightUpdate::TimedOut)
             .then(|| compute_parse_window(text, edit_start_byte, None))
@@ -149,6 +216,7 @@ impl InputHighlighter for TreeSitterInputHighlighter {
             let language = language.clone();
             let text = text.clone();
             let text_for_apply = text.clone();
+            let windowed_request_generation = request_generation.clone();
             let cancel = Arc::new(AtomicBool::new(false));
             let task = cx.spawn_in(window, async move |entity, cx| {
                 let _cancel_guard = CancelOnDrop(cancel.clone());
@@ -195,6 +263,9 @@ impl InputHighlighter for TreeSitterInputHighlighter {
                         })
                     })
                     .await;
+                if windowed_request_generation.get() != generation {
+                    return;
+                }
                 if let Some(windowed_tree) = result {
                     let applied = highlighter.borrow_mut().apply_windowed_tree(
                         windowed_tree,
@@ -218,6 +289,7 @@ impl InputHighlighter for TreeSitterInputHighlighter {
             cx.background_executor().timer(PARSE_DEBOUNCE).await;
 
             let parse_cancel = cancel.clone();
+            let parse_text = text.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -237,10 +309,10 @@ impl InputHighlighter for TreeSitterInputHighlighter {
                     } else {
                         parser.parse_with_options(
                             &mut |offset, _| {
-                                if offset >= text.len() {
+                                if offset >= parse_text.len() {
                                     ""
                                 } else {
-                                    let (chunk, chunk_byte_ix) = text.chunk(offset);
+                                    let (chunk, chunk_byte_ix) = parse_text.chunk(offset);
                                     &chunk[offset - chunk_byte_ix..]
                                 }
                             },
@@ -251,32 +323,85 @@ impl InputHighlighter for TreeSitterInputHighlighter {
                     if parse_cancel.load(Ordering::Relaxed) {
                         return None;
                     }
-                    let injections = injection_data.map_or_else(Default::default, |data| {
-                        SyntaxHighlighter::compute_injection_layers(data, &tree, &text)
-                    });
+                    let marked_snapshot = if needs_snapshot {
+                        Some(SyntaxHighlighter::marked_syntax_snapshot_from(
+                            &language,
+                            &parse_text,
+                            Some(&tree),
+                            Some(&parse_cancel),
+                        )?)
+                    } else {
+                        None
+                    };
                     let folds = if folding {
-                        extract_fold_ranges(&tree)
+                        extract_fold_ranges_with_cancel(&tree, Some(&parse_cancel))?
                     } else {
                         Vec::new()
                     };
-                    Some((tree, injections, folds))
+                    Some((tree, folds, marked_snapshot))
                 })
                 .await;
 
-            if let Some((tree, injections, folds)) = result {
-                let applied = highlighter.borrow_mut().apply_background_tree(
-                    tree,
-                    &text_for_apply,
-                    injections,
-                );
-                if applied {
+            if request_generation.get() != generation {
+                return;
+            }
+            if let Some((tree, folds, marked_snapshot)) = result {
+                let tree_for_injections = tree.clone();
+                let applied_revision = {
+                    let mut highlighter = highlighter.borrow_mut();
+                    highlighter
+                        .apply_background_tree(tree, &text_for_apply, Vec::new())
+                        .then(|| highlighter.full_tree_revision())
+                };
+                if let Some(applied_revision) = applied_revision {
                     ready.set(true);
-                    snapshot_ready.set(true);
+                    full_parse_pending.set(false);
+                    if let Some(marked_snapshot) = marked_snapshot {
+                        snapshot_pending.set(false);
+                        *snapshot.borrow_mut() = Some(Rc::new(marked_snapshot));
+                    }
                     let _ = entity.update(cx, |state, cx| {
                         state.apply_highlighter_fold_candidates(folds, cx);
                     });
+
+                    let Some(injection_data) = injection_data else {
+                        return;
+                    };
+                    if cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let injection_cancel = cancel.clone();
+                    let injection_text = text.clone();
+                    let injections = cx
+                        .background_executor()
+                        .spawn(async move {
+                            SyntaxHighlighter::compute_injection_layers_with_cancel(
+                                injection_data,
+                                &tree_for_injections,
+                                &injection_text,
+                                Some(&injection_cancel),
+                            )
+                        })
+                        .await;
+                    if request_generation.get() != generation || cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let applied = highlighter.borrow_mut().apply_background_injections(
+                        &text_for_apply,
+                        applied_revision,
+                        injections,
+                    );
+                    if applied {
+                        let _ = entity.update(cx, |_, cx| cx.notify());
+                    }
+                    return;
                 }
             }
+            if needs_snapshot {
+                snapshot_pending.set(false);
+            }
+            full_parse_pending.set(false);
+            let _ = entity.update(cx, |_, cx| cx.notify());
         });
         parse_task.borrow_mut().replace(task);
     }
@@ -358,38 +483,53 @@ fn to_tree_sitter_edit(edit: BaseInputEdit) -> InputEdit {
 }
 
 fn extract_fold_ranges(tree: &tree_sitter::Tree) -> Vec<FoldRange> {
-    extract_fold_ranges_in_range(tree, 0..usize::MAX)
+    extract_fold_ranges_with_cancel(tree, None).unwrap_or_default()
 }
 
 fn extract_fold_ranges_in_range(
     tree: &tree_sitter::Tree,
     byte_range: Range<usize>,
 ) -> Vec<FoldRange> {
-    fn collect(node: tree_sitter::Node, bytes: &Range<usize>, ranges: &mut Vec<FoldRange>) {
-        if node.end_byte() <= bytes.start || node.start_byte() >= bytes.end {
-            return;
+    extract_fold_ranges_in_range_with_cancel(tree, byte_range, None).unwrap_or_default()
+}
+
+fn extract_fold_ranges_with_cancel(
+    tree: &tree_sitter::Tree,
+    cancelled: Option<&AtomicBool>,
+) -> Option<Vec<FoldRange>> {
+    extract_fold_ranges_in_range_with_cancel(tree, 0..usize::MAX, cancelled)
+}
+
+fn extract_fold_ranges_in_range_with_cancel(
+    tree: &tree_sitter::Tree,
+    byte_range: Range<usize>,
+    cancelled: Option<&AtomicBool>,
+) -> Option<Vec<FoldRange>> {
+    let root = tree.root_node();
+    let mut stack = Vec::new();
+    let mut cursor = root.walk();
+    stack.extend(root.named_children(&mut cursor));
+    let mut ranges = Vec::new();
+
+    while let Some(node) = stack.pop() {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return None;
+        }
+        if node.end_byte() <= byte_range.start || node.start_byte() >= byte_range.end {
+            continue;
         }
         let start = node.start_position().row;
         let end = node.end_position().row;
         if end.saturating_sub(start) < 2 {
-            return;
+            continue;
         }
         ranges.push(FoldRange::new(start, end));
         let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            collect(child, bytes, ranges);
-        }
-    }
-
-    let root = tree.root_node();
-    let mut ranges = Vec::new();
-    let mut cursor = root.walk();
-    for child in root.named_children(&mut cursor) {
-        collect(child, &byte_range, &mut ranges);
+        stack.extend(node.named_children(&mut cursor));
     }
     ranges.sort_by_key(|range| range.start_line);
     ranges.dedup_by_key(|range| range.start_line);
-    ranges
+    Some(ranges)
 }
 
 #[cfg(test)]

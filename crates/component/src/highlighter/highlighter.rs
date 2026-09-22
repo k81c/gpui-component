@@ -568,20 +568,33 @@ impl SyntaxHighlighter {
 
     /// Return structural marked-text data from the current parsed tree.
     pub(crate) fn marked_syntax_snapshot(&self) -> MarkedSyntaxSnapshot {
+        Self::marked_syntax_snapshot_from(&self.language, &self.text, self.tree.as_ref(), None)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn marked_syntax_snapshot_from(
+        language: &str,
+        text: &Rope,
+        tree: Option<&Tree>,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Option<MarkedSyntaxSnapshot> {
         let mut snapshot = MarkedSyntaxSnapshot {
-            heading_levels: vec![None; self.text.len_lines(ropey::LineType::LF)],
+            heading_levels: vec![None; text.len_lines(ropey::LineType::LF)],
             ..Default::default()
         };
-        let Some(tree) = self.tree.as_ref() else {
-            return snapshot;
+        let Some(tree) = tree else {
+            return Some(snapshot);
         };
 
         let mut stack = vec![tree.root_node()];
         while let Some(node) = stack.pop() {
+            if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+                return None;
+            }
             let mut cursor = node.walk();
             stack.extend(node.children(&mut cursor));
 
-            if let Some(level) = Self::detect_heading_level(&self.language, &self.text, &node) {
+            if let Some(level) = Self::detect_heading_level(language, text, &node) {
                 let row = node.start_position().row;
                 if row < snapshot.heading_levels.len() {
                     snapshot.heading_levels[row] = Some(level);
@@ -611,7 +624,7 @@ impl SyntaxHighlighter {
         snapshot.table_ranges.dedup();
         snapshot.code_block_ranges.sort_by_key(|range| range.start);
         snapshot.code_block_ranges.dedup();
-        snapshot
+        Some(snapshot)
     }
 
     /// Return the heading level for each source row when the language has a
@@ -631,16 +644,19 @@ impl SyntaxHighlighter {
 
     fn detect_heading_level(lang: &str, text: &Rope, node: &tree_sitter::Node) -> Option<u8> {
         let kind = node.kind();
-        let source = text.slice(node.start_byte()..node.end_byte()).to_string();
-        let first_line = source.lines().next().unwrap_or_default().trim_start();
 
         match lang {
             "markdown" => {
                 if kind == "atx_heading" {
-                    return Self::count_heading_marker_prefix(first_line, '#');
+                    let line = text
+                        .line(node.start_position().row, ropey::LineType::LF)
+                        .to_string();
+                    return Self::count_heading_marker_prefix(line.trim_start(), '#');
                 }
                 if kind == "setext_heading" {
-                    let marker = source.lines().nth(1).unwrap_or_default().trim();
+                    let marker_row = node.start_position().row.saturating_add(1);
+                    let marker = text.line(marker_row, ropey::LineType::LF).to_string();
+                    let marker = marker.trim();
                     if marker.starts_with('=') {
                         return Some(1);
                     }
@@ -661,12 +677,19 @@ impl SyntaxHighlighter {
                 };
             }
             "djot" if kind.contains("heading") || kind == "section" => {
-                return Self::count_heading_marker_prefix(first_line, '#');
+                let line = text
+                    .line(node.start_position().row, ropey::LineType::LF)
+                    .to_string();
+                return Self::count_heading_marker_prefix(line.trim_start(), '#');
             }
             _ => {}
         }
 
         if kind.contains("heading") {
+            let line = text
+                .line(node.start_position().row, ropey::LineType::LF)
+                .to_string();
+            let first_line = line.trim_start();
             Self::count_heading_marker_prefix(first_line, '#')
                 .or_else(|| Self::count_heading_marker_prefix(first_line, '='))
         } else {
@@ -814,6 +837,15 @@ impl SyntaxHighlighter {
         tree: &Tree,
         text: &Rope,
     ) -> Vec<InjectionLayer> {
+        Self::compute_injection_layers_with_cancel(data, tree, text, None)
+    }
+
+    pub(crate) fn compute_injection_layers_with_cancel(
+        data: InjectionParseData,
+        tree: &Tree,
+        text: &Rope,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Vec<InjectionLayer> {
         struct CombinedRanges {
             ranges: Vec<tree_sitter::Range>,
             byte_count: usize,
@@ -906,6 +938,9 @@ impl SyntaxHighlighter {
         let mut new_layers = Vec::new();
         let mut non_combined_parses = 0usize;
         while let Some(query_match) = matches.next() {
+            if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+                return Vec::new();
+            }
             let mut language_name: Option<SharedString> = None;
             let mut combined = false;
             for prop in data.query.property_settings(query_match.pattern_index) {
@@ -990,6 +1025,7 @@ impl SyntaxHighlighter {
                     ranges,
                     old_tree,
                     text,
+                    cancelled,
                 ) {
                     new_layers.push(layer);
                 }
@@ -997,6 +1033,9 @@ impl SyntaxHighlighter {
         }
 
         for (language_name, combined) in combined_ranges {
+            if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+                return Vec::new();
+            }
             let mut ranges = combined.ranges;
             if ranges.is_empty() {
                 continue;
@@ -1012,9 +1051,14 @@ impl SyntaxHighlighter {
             let Some(highlight_query) = highlight_queries.get(&language_name).cloned() else {
                 continue;
             };
-            if let Some(layer) =
-                Self::parse_injection_layer(&language_name, highlight_query, ranges, old_tree, text)
-            {
+            if let Some(layer) = Self::parse_injection_layer(
+                &language_name,
+                highlight_query,
+                ranges,
+                old_tree,
+                text,
+                cancelled,
+            ) {
                 new_layers.push(layer);
             }
         }
@@ -1030,6 +1074,7 @@ impl SyntaxHighlighter {
         ranges: Vec<tree_sitter::Range>,
         old_tree: Option<&Tree>,
         text: &Rope,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
     ) -> Option<InjectionLayer> {
         fn bounding_byte_range(ranges: &[tree_sitter::Range]) -> Option<Range<usize>> {
             let start = ranges.iter().map(|r| r.start_byte).min()?;
@@ -1042,7 +1087,9 @@ impl SyntaxHighlighter {
         let parse_start = Instant::now();
         let mut timed_out = false;
         let mut progress = |_: &tree_sitter::ParseState| -> ControlFlow<()> {
-            if parse_start.elapsed() > INJECTION_PARSE_TIMEOUT {
+            if parse_start.elapsed() > INJECTION_PARSE_TIMEOUT
+                || cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+            {
                 timed_out = true;
                 ControlFlow::Break(())
             } else {
@@ -1096,6 +1143,21 @@ impl SyntaxHighlighter {
         self.injection_layers = injection_layers;
         self.windowed_tree = None;
         self.full_tree_revision += 1;
+        self.highlight_revision += 1;
+        true
+    }
+
+    pub(crate) fn apply_background_injections(
+        &mut self,
+        text: &Rope,
+        expected_full_tree_revision: u64,
+        injection_layers: Vec<InjectionLayer>,
+    ) -> bool {
+        if !self.text.eq(text) || self.full_tree_revision != expected_full_tree_revision {
+            return false;
+        }
+
+        self.injection_layers = injection_layers;
         self.highlight_revision += 1;
         true
     }
@@ -1543,6 +1605,41 @@ mod tests {
             &markdown[snapshot.table_ranges[0].clone()],
             "| a | b |\n|---|---|\n| 1 | 2 |\n"
         );
+    }
+
+    #[cfg(feature = "tree-sitter-languages")]
+    #[test]
+    fn marked_snapshot_detects_cjk_headings_in_supported_languages() {
+        for (language, source, expected_row, expected_level) in [
+            ("markdown", "日本語の見出し\n================\n本文\n", 0, 1),
+            ("djot", "### 日本語の見出し\n\n本文\n", 0, 3),
+            ("asciidoc", "== 日本語の見出し\n\n本文\n", 0, 2),
+        ] {
+            let rope = Rope::from(source);
+            let mut highlighter = SyntaxHighlighter::new(language);
+            assert!(highlighter.update(None, &rope, None), "{language}");
+
+            let snapshot = highlighter.marked_syntax_snapshot();
+            assert_eq!(
+                snapshot.heading_levels[expected_row],
+                Some(expected_level),
+                "{language}"
+            );
+        }
+    }
+
+    #[cfg(feature = "tree-sitter-languages")]
+    #[test]
+    fn marked_snapshot_ignores_large_non_heading_nodes() {
+        let source = format!("{}\n", "日本語 text ".repeat(32_768));
+        let rope = Rope::from(source);
+        let mut highlighter = SyntaxHighlighter::new("markdown");
+        assert!(highlighter.update(None, &rope, None));
+
+        let snapshot = highlighter.marked_syntax_snapshot();
+        assert!(snapshot.heading_levels.iter().all(Option::is_none));
+        assert!(snapshot.table_ranges.is_empty());
+        assert!(snapshot.code_block_ranges.is_empty());
     }
 
     #[cfg(feature = "tree-sitter-languages")]
