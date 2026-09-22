@@ -11,6 +11,10 @@ rather than project-progress logs.
 - [GPUI Shell](gpui-shell.md) explains the scriptable application runtime built
   on `gpui-base`: the engine seam, the render protocol, call scopes, the object
   model, capabilities and the sandbox, and the measured performance model.
+- [Upstream sync 保守ガイド](upstream-sync/README.md) records the fork's fixed
+  baseline, implementation differences, complete file inventory, porting order,
+  and validation evidence for the next upstream sync. This maintenance guide is
+  intentionally written in Japanese.
 
 For component-level APIs and runnable examples, see the
 [gpui-base documentation](../website/base/index.md).

@@ -1,5 +1,12 @@
 # MarkedEditor 利用アプリ移行コンテキスト
 
+> **履歴資料:** この文書は `681d857ce46a7056b174a32bb80312cb87eebf1d` までを中心に
+> 作成されたアプリ利用側の移行資料です。fork 実装全体の現行仕様は
+> `docs/upstream-sync/README.md` と `DIFFERENCES.md` を正本として参照してください。
+> 現行 `d12bb0f9fa551ae41cab65c3ea08d3649102a727` では `set_content` はまず
+> presentation を pending にして stale な表示と表範囲を無効化し、snapshot 完了前の
+> 見出しを同期的には構築しません。この点は下記の旧説明より現行正本を優先します。
+
 この文書は、この fork を利用する GPUI アプリを同期後 API へ移行する担当者または
 コーディングエージェントへ、そのままコンテキストとして渡すための資料です。公開
 サイト向けのコンポーネント説明ではなく、移行時の判断基準、API 対応、検証条件を
@@ -170,8 +177,8 @@ editor.update(cx, |state, cx| {
 ```
 
 初期値も `MarkedEditorState::set_value` 経由で設定してください。内部 editor へ直接
-`set_value` しても observer は追従しますが、facade 経由なら解析完了前の見出し表示も
-即時更新されます。
+`set_value` しても observer は追従しますが、facade 経由なら stale な presentation と表
+range を直ちに無効化できます。新しい見出し表示は解析 snapshot の完了後に更新されます。
 
 atomic inline token を含む文書は `InputContent` を組み立て、`set_content` で復元します。
 token の byte range は本文と一致し、UTF-8 文字境界上になければなりません。見出し行の
@@ -240,7 +247,7 @@ if let Some(range) = range {
 として追加しました。対応の再確認には次を使います。
 
 ```text
-git range-diff 20d65289d7e4d2573456b8ed907a73876d224bd1..0108a8b634db9e25d745d8c40f8ae526c45e33fc 7f6d92327936fbab7994a35c86328d793acc060d..codex/sync-upstream-7f6d9232
+git range-diff --no-color 20d65289d7e4d2573456b8ed907a73876d224bd1..0108a8b634db9e25d745d8c40f8ae526c45e33fc 7f6d92327936fbab7994a35c86328d793acc060d..681d857ce46a7056b174a32bb80312cb87eebf1d
 ```
 
 ## アプリ側の探索手順

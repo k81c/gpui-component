@@ -1,16 +1,32 @@
 # Upstream sync range-diff record
 
+> **Historical record:** This file records the rebase through
+> `681d857ce46a7056b174a32bb80312cb87eebf1d`. It does not include the final
+> `d12bb0f9fa551ae41cab65c3ea08d3649102a727` implementation. For the current
+> specification, complete inventory, and next-sync procedure, use
+> `docs/upstream-sync/README.md`. In particular, the later commit changes
+> snapshot scheduling, table-range validation, presentation caching, and
+> wrap/fold geometry.
+
 ## Compared ranges
 
 - Old baseline: `20d65289d7e4d2573456b8ed907a73876d224bd1`
 - Old fork tip: `0108a8b634db9e25d745d8c40f8ae526c45e33fc`
 - New baseline: `7f6d92327936fbab7994a35c86328d793acc060d`
 - New branch: `codex/sync-upstream-7f6d9232`
+- Recorded new tip: `681d857ce46a7056b174a32bb80312cb87eebf1d`
 
 Run the patch-level comparison with:
 
 ```text
 git range-diff --no-color 20d65289d7e4d2573456b8ed907a73876d224bd1..0108a8b634db9e25d745d8c40f8ae526c45e33fc 7f6d92327936fbab7994a35c86328d793acc060d..codex/sync-upstream-7f6d9232
+```
+
+The branch form above reproduces the original working command only while the
+branch still points at the recorded tip. The immutable form is:
+
+```text
+git range-diff --no-color 20d65289d7e4d2573456b8ed907a73876d224bd1..0108a8b634db9e25d745d8c40f8ae526c45e33fc 7f6d92327936fbab7994a35c86328d793acc060d..681d857ce46a7056b174a32bb80312cb87eebf1d
 ```
 
 ## Recorded alignment
@@ -36,4 +52,6 @@ git range-diff --no-color 20d65289d7e4d2573456b8ed907a73876d224bd1..0108a8b634db
 - Foreground, background, windowed, and injection parsing resolve parsers through `LanguageRegistry::parser()`, including factory-only languages.
 - New commits cover atomic token geometry under variable line height, a dedicated Story, the preserved relative-height patch, and focused contract tests.
 
-This file records the semantic alignment; the command above is authoritative for the complete patch-level range-diff.
+This file records the historical semantic alignment. The immutable command
+above is authoritative only for that recorded range; it is not the complete
+current fork specification.
